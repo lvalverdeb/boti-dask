@@ -23,15 +23,18 @@ from boti_dask.resilience import (
 )
 from boti_dask.session import (
     DaskSession,
+    DaskSessionSettings,
     apply_recommended_dask_config,
     current_client_summary,
     dask_session,
+    dask_session_from_env_prefix,
     describe_client,
     recommended_dask_config,
 )
 
 __all__ = [
     "DaskSession",
+    "DaskSessionSettings",
     "RECOVERABLE_DASK_ERRORS",
     "UniqueValuesExtractor",
     "apply_recommended_dask_config",
@@ -44,6 +47,7 @@ __all__ = [
     "dask_is_empty",
     "dask_is_probably_empty",
     "dask_session",
+    "dask_session_from_env_prefix",
     "describe_frame",
     "describe_client",
     "diagnostics_logger",

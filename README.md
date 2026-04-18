@@ -14,6 +14,7 @@ Dask runtime/session/resilience utilities for the Boti ecosystem.
 This initial bootstrap provides:
 
 - `DaskSession` and `dask_session(...)` helpers
+- `DaskSessionSettings` and `dask_session_from_env_prefix(...)` helpers
 - shared-session lifecycle support
 - recommended Dask config profile helpers
 - resilient execution wrappers:
@@ -34,6 +35,15 @@ with dask_session(cluster_kwargs={"n_workers": 1, "threads_per_worker": 1, "proc
     value = dask.delayed(lambda: 6 * 7)()
     print(safe_compute(value, dask_client=client))
     print(inspect_graph(value))
+```
+
+Load session defaults from prefixed environment variables:
+
+```python
+from boti_dask import DaskSessionSettings, dask_session_from_env_prefix
+
+settings = DaskSessionSettings.from_env_prefix("BOTI_DASK_", env_file=".env")
+session = dask_session_from_env_prefix("BOTI_DASK_", env_file=".env", verify_connectivity=True)
 ```
 
 ## Development

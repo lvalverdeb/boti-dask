@@ -5,7 +5,9 @@
 ## Primary symbols
 
 - `DaskSession`
+- `DaskSessionSettings`
 - `dask_session(...)`
+- `dask_session_from_env_prefix(...)`
 - `recommended_dask_config(...)`
 - `apply_recommended_dask_config(...)`
 - `describe_client(...)`
@@ -27,4 +29,7 @@ with dask_session(
 
 - `shared=True` + `shared_key=...` enables cross-context shared session reuse.
 - Session close emits a runtime warning when live persisted collections are tracked.
+- `DaskSessionSettings.from_env_prefix(...)` supports typed env-backed loading for
+  `scheduler_address`, `shared`, `shared_key`, `verify_connectivity`,
+  `cluster_kwargs` (JSON), and `client_kwargs` (JSON).
 

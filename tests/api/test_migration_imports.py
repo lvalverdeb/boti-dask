@@ -6,6 +6,7 @@ import boti_dask
 def test_boti_dask_exports_migration_symbols():
     expected = {
         "DaskSession",
+        "DaskSessionSettings",
         "UniqueValuesExtractor",
         "apply_recommended_dask_config",
         "async_safe_compute",
@@ -16,6 +17,7 @@ def test_boti_dask_exports_migration_symbols():
         "dask_is_empty",
         "dask_is_probably_empty",
         "dask_session",
+        "dask_session_from_env_prefix",
         "describe_client",
         "describe_frame",
         "diagnostics_logger",

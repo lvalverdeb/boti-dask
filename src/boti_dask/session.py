@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import re
+import threading
 import warnings
 import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import dask
@@ -33,17 +38,22 @@ _RECOMMENDED_DASK_CONFIG = {
 _MANAGED_CLIENT_REGISTRY: dict[int, weakref.ReferenceType[Any]] = {}
 _PERSISTED_COLLECTION_REGISTRY: dict[int, list[weakref.ReferenceType[Any]]] = {}
 _SHARED_SESSION_REGISTRY: dict[str, dict[str, Any]] = {}
+_REGISTRY_LOCK = threading.RLock()
+
+_ENV_PREFIX_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*_?$")
 
 
 # Internal helpers are intentionally module-level so resilience helpers can share state.
 def _register_managed_client(client: Any) -> None:
-    _MANAGED_CLIENT_REGISTRY[id(client)] = weakref.ref(client)
+    with _REGISTRY_LOCK:
+        _MANAGED_CLIENT_REGISTRY[id(client)] = weakref.ref(client)
 
 
 def _unregister_managed_client(client: Any) -> None:
     client_id = id(client)
-    _MANAGED_CLIENT_REGISTRY.pop(client_id, None)
-    _PERSISTED_COLLECTION_REGISTRY.pop(client_id, None)
+    with _REGISTRY_LOCK:
+        _MANAGED_CLIENT_REGISTRY.pop(client_id, None)
+        _PERSISTED_COLLECTION_REGISTRY.pop(client_id, None)
 
 
 def _is_dask_dataframe_like(obj: Any) -> bool:
@@ -54,8 +64,9 @@ def _track_persisted_collection(obj: Any, client: Any | None) -> None:
     if client is None or not _is_dask_dataframe_like(obj):
         return
     client_id = id(client)
-    if client_id not in _MANAGED_CLIENT_REGISTRY:
-        return
+    with _REGISTRY_LOCK:
+        if client_id not in _MANAGED_CLIENT_REGISTRY:
+            return
     try:
         setattr(obj, "_boti_managed_persisted", True)
     except Exception:
@@ -64,17 +75,19 @@ def _track_persisted_collection(obj: Any, client: Any | None) -> None:
         ref = weakref.ref(obj)
     except TypeError:
         return
-    _PERSISTED_COLLECTION_REGISTRY.setdefault(client_id, []).append(ref)
+    with _REGISTRY_LOCK:
+        _PERSISTED_COLLECTION_REGISTRY.setdefault(client_id, []).append(ref)
 
 
 def _live_persisted_collection_count(client: Any) -> int:
     client_id = id(client)
-    refs = _PERSISTED_COLLECTION_REGISTRY.get(client_id, [])
-    live_refs = [ref for ref in refs if ref() is not None]
-    if live_refs:
-        _PERSISTED_COLLECTION_REGISTRY[client_id] = live_refs
-    else:
-        _PERSISTED_COLLECTION_REGISTRY.pop(client_id, None)
+    with _REGISTRY_LOCK:
+        refs = _PERSISTED_COLLECTION_REGISTRY.get(client_id, [])
+        live_refs = [ref for ref in refs if ref() is not None]
+        if live_refs:
+            _PERSISTED_COLLECTION_REGISTRY[client_id] = live_refs
+        else:
+            _PERSISTED_COLLECTION_REGISTRY.pop(client_id, None)
     return len(live_refs)
 
 
@@ -108,24 +121,29 @@ def _verify_client_connection(client: Any) -> None:
 
 def _register_shared_session(key: str, *, client: Any, cluster: Any | None) -> None:
     _register_managed_client(client)
-    _SHARED_SESSION_REGISTRY[key] = {
-        "client": client,
-        "cluster": cluster,
-        "ref_count": 1,
-    }
+    with _REGISTRY_LOCK:
+        _SHARED_SESSION_REGISTRY[key] = {
+            "client": client,
+            "cluster": cluster,
+            "ref_count": 1,
+        }
 
 
 def _release_shared_session(key: str, *, logger: Any | None = None) -> None:
-    entry = _SHARED_SESSION_REGISTRY.get(key)
-    if entry is None:
-        return
-    entry["ref_count"] = int(entry.get("ref_count", 0)) - 1
-    if entry["ref_count"] > 0:
-        _log(logger, "debug", f"Released shared Dask session key={key!r}; ref_count={entry['ref_count']}")
-        return
+    client: Any | None = None
+    cluster: Any | None = None
+    with _REGISTRY_LOCK:
+        entry = _SHARED_SESSION_REGISTRY.get(key)
+        if entry is None:
+            return
+        entry["ref_count"] = int(entry.get("ref_count", 0)) - 1
+        if entry["ref_count"] > 0:
+            _log(logger, "debug", f"Released shared Dask session key={key!r}; ref_count={entry['ref_count']}")
+            return
+        client = entry.get("client")
+        cluster = entry.get("cluster")
+        _SHARED_SESSION_REGISTRY.pop(key, None)
 
-    client = entry.get("client")
-    cluster = entry.get("cluster")
     if client is not None:
         live_collections = _live_persisted_collection_count(client)
         if live_collections:
@@ -143,7 +161,6 @@ def _release_shared_session(key: str, *, logger: Any | None = None) -> None:
             _unregister_managed_client(client)
     if cluster is not None:
         cluster.close()
-    _SHARED_SESSION_REGISTRY.pop(key, None)
 
 
 def describe_client(client: Any) -> dict[str, Any]:
@@ -181,6 +198,115 @@ def recommended_dask_config(*, overrides: Mapping[str, Any] | None = None) -> di
 
 def apply_recommended_dask_config(**overrides: Any) -> Any:
     return dask.config.set(recommended_dask_config(overrides=overrides))
+
+
+def _validate_env_prefix(prefix: str) -> str:
+    normalized = prefix.strip()
+    if not normalized or not _ENV_PREFIX_PATTERN.fullmatch(normalized):
+        raise ValueError(
+            "Environment prefixes must match [A-Za-z_][A-Za-z0-9_]* and may end with a single underscore."
+        )
+    return normalized
+
+
+def _parse_env_bool(raw: str, *, field_name: str) -> bool:
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"Invalid boolean value for {field_name!r}: {raw!r}. Use one of true/false, yes/no, 1/0."
+    )
+
+
+def _parse_env_json_mapping(raw: str, *, field_name: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid JSON value for {field_name!r}: {raw!r}. Provide a JSON object."
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Invalid value for {field_name!r}: expected a JSON object.")
+    return dict(parsed)
+
+
+def _load_dotenv_values(env_file: str | Path | None) -> dict[str, str]:
+    if env_file is None:
+        return {}
+    path = Path(env_file)
+    if not path.exists():
+        return {}
+
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, raw_value = stripped.split("=", 1)
+        key = key.strip()
+        value = raw_value.strip()
+        if value and len(value) >= 2 and value[0] == value[-1] and value[0] in {"\"", "'"}:
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+@dataclass(slots=True)
+class DaskSessionSettings:
+    scheduler_address: str | None = None
+    shared: bool = False
+    shared_key: str | None = None
+    verify_connectivity: bool = False
+    cluster_kwargs: dict[str, Any] = field(default_factory=dict)
+    client_kwargs: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_env_prefix(
+        cls,
+        prefix: str,
+        *,
+        env_file: str | Path | None = None,
+    ) -> DaskSessionSettings:
+        normalized_prefix = _validate_env_prefix(prefix)
+        merged = _load_dotenv_values(env_file)
+        merged.update({k: v for k, v in os.environ.items() if isinstance(v, str)})
+
+        scheduler_address = merged.get(f"{normalized_prefix}SCHEDULER_ADDRESS")
+        shared_raw = merged.get(f"{normalized_prefix}SHARED")
+        shared_key = merged.get(f"{normalized_prefix}SHARED_KEY")
+        verify_raw = merged.get(f"{normalized_prefix}VERIFY_CONNECTIVITY")
+        cluster_kwargs_raw = merged.get(f"{normalized_prefix}CLUSTER_KWARGS")
+        client_kwargs_raw = merged.get(f"{normalized_prefix}CLIENT_KWARGS")
+
+        return cls(
+            scheduler_address=scheduler_address or None,
+            shared=False if shared_raw is None else _parse_env_bool(shared_raw, field_name="shared"),
+            shared_key=shared_key or None,
+            verify_connectivity=False
+            if verify_raw is None
+            else _parse_env_bool(verify_raw, field_name="verify_connectivity"),
+            cluster_kwargs={}
+            if cluster_kwargs_raw is None
+            else _parse_env_json_mapping(cluster_kwargs_raw, field_name="cluster_kwargs"),
+            client_kwargs={}
+            if client_kwargs_raw is None
+            else _parse_env_json_mapping(client_kwargs_raw, field_name="client_kwargs"),
+        )
+
+    def to_session_kwargs(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "shared": self.shared,
+            "verify_connectivity": self.verify_connectivity,
+            "cluster_kwargs": dict(self.cluster_kwargs),
+            "client_kwargs": dict(self.client_kwargs),
+        }
+        if self.scheduler_address:
+            payload["scheduler_address"] = self.scheduler_address
+        if self.shared_key:
+            payload["shared_key"] = self.shared_key
+        return payload
 
 
 @dataclass(slots=True)
@@ -248,18 +374,28 @@ class DaskSession:
 
         if self.shared:
             session_key = self._shared_key()
-            shared_entry = _SHARED_SESSION_REGISTRY.get(session_key)
-            if shared_entry is not None:
-                client = shared_entry.get("client")
-                if _is_running_client(client):
-                    shared_entry["ref_count"] = int(shared_entry.get("ref_count", 0)) + 1
-                    self.client = client
-                    self._cluster = shared_entry.get("cluster")
-                    self._shared_session_key = session_key
-                    self._verify_client_if_requested(client)
-                    self._log("info", f"Reusing shared Dask session {describe_client(client)} key={session_key!r}")
-                    return client
-                _SHARED_SESSION_REGISTRY.pop(session_key, None)
+            with _REGISTRY_LOCK:
+                shared_entry = _SHARED_SESSION_REGISTRY.get(session_key)
+                if shared_entry is not None:
+                    client = shared_entry.get("client")
+                    if _is_running_client(client):
+                        shared_entry["ref_count"] = int(shared_entry.get("ref_count", 0)) + 1
+                        cluster = shared_entry.get("cluster")
+                    else:
+                        _SHARED_SESSION_REGISTRY.pop(session_key, None)
+                        client = None
+                        cluster = None
+                else:
+                    client = None
+                    cluster = None
+
+            if client is not None:
+                self.client = client
+                self._cluster = cluster
+                self._shared_session_key = session_key
+                self._verify_client_if_requested(client)
+                self._log("info", f"Reusing shared Dask session {describe_client(client)} key={session_key!r}")
+                return client
 
         if self.scheduler_address is not None:
             client = Client(self.scheduler_address, **dict(self.client_kwargs))
@@ -343,6 +479,28 @@ class DaskSession:
     async def aclose(self) -> None:
         await asyncio.to_thread(self.close)
 
+    @classmethod
+    def from_env_prefix(
+        cls,
+        prefix: str,
+        *,
+        env_file: str | Path | None = None,
+        **overrides: Any,
+    ) -> DaskSession:
+        settings = DaskSessionSettings.from_env_prefix(prefix, env_file=env_file)
+        payload = settings.to_session_kwargs()
+        payload.update(overrides)
+        return cls(**payload)
+
+
+def dask_session_from_env_prefix(
+    prefix: str,
+    *,
+    env_file: str | Path | None = None,
+    **overrides: Any,
+) -> DaskSession:
+    return DaskSession.from_env_prefix(prefix, env_file=env_file, **overrides)
+
 
 def dask_session(**kwargs: Any) -> DaskSession:
     return DaskSession(**kwargs)
@@ -350,9 +508,11 @@ def dask_session(**kwargs: Any) -> DaskSession:
 
 __all__ = [
     "DaskSession",
+    "DaskSessionSettings",
     "apply_recommended_dask_config",
     "current_client_summary",
     "dask_session",
+    "dask_session_from_env_prefix",
     "describe_client",
     "recommended_dask_config",
 ]
