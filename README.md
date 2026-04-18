@@ -31,11 +31,13 @@ This initial bootstrap provides:
 from boti_dask import dask_session, inspect_graph, safe_compute
 import dask
 
-with dask_session(cluster_kwargs={"n_workers": 1, "threads_per_worker": 1, "processes": False, "dashboard_address": None}) as client:
+with dask_session(cluster_kwargs={"n_workers": 1, "threads_per_worker": 1, "processes": False, "dashboard_address": ":0"}) as client:
     value = dask.delayed(lambda: 6 * 7)()
     print(safe_compute(value, dask_client=client))
     print(inspect_graph(value))
 ```
+
+If `dashboard_address` is omitted for local managed sessions, `boti-dask` defaults it to `":0"`.
 
 Load session defaults from prefixed environment variables:
 

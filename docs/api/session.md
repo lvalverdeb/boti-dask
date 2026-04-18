@@ -20,7 +20,7 @@ from boti_dask import dask_session, describe_client
 
 with dask_session(
     verify_connectivity=True,
-    cluster_kwargs={"n_workers": 1, "threads_per_worker": 1, "processes": False, "dashboard_address": None},
+    cluster_kwargs={"n_workers": 1, "threads_per_worker": 1, "processes": False, "dashboard_address": ":0"},
 ) as client:
     print(describe_client(client))
 ```
@@ -29,6 +29,8 @@ with dask_session(
 
 - `shared=True` + `shared_key=...` enables cross-context shared session reuse.
 - Session close emits a runtime warning when live persisted collections are tracked.
+- When `dask_session(...)` creates a local `LocalCluster` and `dashboard_address` is not set,
+  it defaults to `":0"` to avoid port `8787` contention.
 - `DaskSessionSettings.from_env_prefix(...)` supports typed env-backed loading for
   `scheduler_address`, `shared`, `shared_key`, `verify_connectivity`,
   `cluster_kwargs` (JSON), and `client_kwargs` (JSON).

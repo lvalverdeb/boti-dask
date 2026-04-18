@@ -56,7 +56,7 @@ def test_dask_session_connects_to_scheduler_address_and_logs():
         n_workers=1,
         threads_per_worker=1,
         processes=False,
-        dashboard_address=None,
+        dashboard_address=":0",
     ) as cluster, Client(cluster):
         with dask_session(scheduler_address=cluster.scheduler_address, logger=logger) as client:
             summary = describe_client(client)
@@ -68,7 +68,7 @@ def test_dask_session_connects_to_scheduler_address_and_logs():
 def test_dask_session_can_create_managed_local_cluster():
     pytest.importorskip("dask.distributed")
 
-    with dask_session(cluster_kwargs={"n_workers": 1, "threads_per_worker": 1, "processes": False, "dashboard_address": None}) as client:
+    with dask_session(cluster_kwargs={"n_workers": 1, "threads_per_worker": 1, "processes": False, "dashboard_address": ":0"}) as client:
         summary = describe_client(client)
 
     assert summary["workers"] == 1
@@ -121,7 +121,7 @@ def test_safe_compute_and_wait_work_with_distributed_client():
         n_workers=1,
         threads_per_worker=1,
         processes=False,
-        dashboard_address=None,
+        dashboard_address=":0",
     ) as cluster:
         with dask_session(scheduler_address=cluster.scheduler_address) as client:
             persisted = safe_persist(delayed_value, dask_client=client)
@@ -142,7 +142,7 @@ def test_safe_head_returns_dataframe_preview_with_distributed_client():
         n_workers=1,
         threads_per_worker=1,
         processes=False,
-        dashboard_address=None,
+        dashboard_address=":0",
     ) as cluster:
         with dask_session(scheduler_address=cluster.scheduler_address) as client:
             preview = safe_head(frame, n=2, dask_client=client)
@@ -161,7 +161,7 @@ def test_safe_head_translates_orphaned_graph_errors():
                 "n_workers": 1,
                 "threads_per_worker": 1,
                 "processes": False,
-                "dashboard_address": None,
+                "dashboard_address": ":0",
             }
         ) as client:
             persisted = safe_persist(frame, dask_client=client)
@@ -190,7 +190,7 @@ def test_managed_session_warns_before_persisted_dataframe_becomes_invalid():
                 "n_workers": 1,
                 "threads_per_worker": 1,
                 "processes": False,
-                "dashboard_address": None,
+                "dashboard_address": ":0",
             }
         ) as client:
             persisted = safe_persist(frame, dask_client=client)
@@ -214,7 +214,7 @@ async def test_async_safe_compute_and_wait_work_with_sync_client():
         n_workers=1,
         threads_per_worker=1,
         processes=False,
-        dashboard_address=None,
+        dashboard_address=":0",
     ) as cluster:
         with dask_session(scheduler_address=cluster.scheduler_address) as client:
             persisted = await async_safe_persist(delayed_value, dask_client=client)
@@ -237,7 +237,7 @@ async def test_async_safe_head_and_gather_work_with_distributed_client():
         n_workers=1,
         threads_per_worker=1,
         processes=False,
-        dashboard_address=None,
+        dashboard_address=":0",
     ) as cluster:
         with dask_session(scheduler_address=cluster.scheduler_address) as client:
             preview = await async_safe_head(frame, n=2, dask_client=client)
@@ -298,7 +298,7 @@ def test_dask_session_can_verify_connectivity_and_reuse_shared_client():
         n_workers=1,
         threads_per_worker=1,
         processes=False,
-        dashboard_address=None,
+        dashboard_address=":0",
     ) as cluster:
         with dask_session(
             scheduler_address=cluster.scheduler_address,
@@ -321,4 +321,3 @@ def test_dask_session_can_verify_connectivity_and_reuse_shared_client():
 
     assert any("Verified Dask client connectivity" in message for message in logger.infos)
     assert any("Reusing shared Dask session" in message for message in logger.infos)
-

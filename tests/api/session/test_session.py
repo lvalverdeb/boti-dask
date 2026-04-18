@@ -47,7 +47,7 @@ def test_dask_session_connects_to_scheduler_address():
         n_workers=1,
         threads_per_worker=1,
         processes=False,
-        dashboard_address=None,
+        dashboard_address=":0",
     ) as cluster, Client(cluster):
         with dask_session(scheduler_address=cluster.scheduler_address, verify_connectivity=True) as client:
             summary = describe_client(client)
@@ -63,7 +63,7 @@ def test_dask_session_reuses_shared_client_by_key():
         n_workers=1,
         threads_per_worker=1,
         processes=False,
-        dashboard_address=None,
+        dashboard_address=":0",
     ) as cluster:
         with dask_session(
             scheduler_address=cluster.scheduler_address,
@@ -144,5 +144,31 @@ def test_dask_session_from_env_prefix_applies_overrides(tmp_path):
     session = dask_session_from_env_prefix("DASK_SESSION_", env_file=env_file, shared=False)
     assert isinstance(session, DaskSession)
     assert session.shared is False
+
+
+def test_prepare_cluster_kwargs_defaults_dashboard_for_localcluster():
+    distributed = pytest.importorskip("dask.distributed")
+    LocalCluster = distributed.LocalCluster
+
+    resolved = session_module._prepare_cluster_kwargs(LocalCluster, {"n_workers": 1})
+
+    assert resolved["dashboard_address"] == ":0"
+
+
+def test_prepare_cluster_kwargs_preserves_explicit_dashboard_address():
+    distributed = pytest.importorskip("dask.distributed")
+    LocalCluster = distributed.LocalCluster
+
+    explicit = session_module._prepare_cluster_kwargs(
+        LocalCluster,
+        {"n_workers": 1, "dashboard_address": ":8789"},
+    )
+    explicit_none = session_module._prepare_cluster_kwargs(
+        LocalCluster,
+        {"n_workers": 1, "dashboard_address": None},
+    )
+
+    assert explicit["dashboard_address"] == ":8789"
+    assert explicit_none["dashboard_address"] is None
 
 

@@ -31,6 +31,10 @@ def test_dask_resilience_example_runs_and_returns_summary(capsys):
     assert result["async_preview_ids"] == [1, 2]
     assert result["async_gather"] == [2, 3]
     assert result["partitions"] == 2
+    assert result["probably_empty"] is False
+    assert result["is_empty"] is False
+    assert set(result["unique_values"]["status"]) == {"active", "inactive"}
+    assert set(result["unique_values"]["id"]) == {1, 2, 3, 4}
     assert result["shared_client_reused"] is True
     assert result["graph_metrics"]["is_dask"] is True
     assert "Resilience graph metrics:" in output
@@ -42,4 +46,6 @@ def test_dask_resilience_example_runs_and_returns_summary(capsys):
     assert "Async resilient total: 42" in output
     assert "Async preview ids: [1, 2]" in output
     assert "Async gathered values: [2, 3]" in output
+    assert "Probably empty: False" in output
+    assert "Is empty: False" in output
 

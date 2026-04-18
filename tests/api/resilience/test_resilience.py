@@ -50,7 +50,7 @@ def test_safe_head_for_dask_dataframe_local():
         n_workers=1,
         threads_per_worker=1,
         processes=False,
-        dashboard_address=None,
+        dashboard_address=":0",
     ) as cluster:
         with dask_session(scheduler_address=cluster.scheduler_address) as client:
             head = safe_head(frame, n=2, dask_client=client)
@@ -67,7 +67,7 @@ def test_safe_persist_and_wait_with_client():
         n_workers=1,
         threads_per_worker=1,
         processes=False,
-        dashboard_address=None,
+        dashboard_address=":0",
     ) as cluster:
         from boti_dask.session import dask_session
 

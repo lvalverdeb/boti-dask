@@ -119,6 +119,14 @@ def _verify_client_connection(client: Any) -> None:
         ) from exc
 
 
+def _prepare_cluster_kwargs(cluster_factory: Any, cluster_kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    resolved = dict(cluster_kwargs)
+    if cluster_factory is LocalCluster and "dashboard_address" not in resolved:
+        # Use an ephemeral dashboard port to avoid default 8787 contention in parallel runs.
+        resolved["dashboard_address"] = ":0"
+    return resolved
+
+
 def _register_shared_session(key: str, *, client: Any, cluster: Any | None) -> None:
     _register_managed_client(client)
     with _REGISTRY_LOCK:
@@ -416,7 +424,8 @@ class DaskSession:
         if cluster_factory is None:
             raise RuntimeError("LocalCluster is unavailable. Install dask[distributed].")
 
-        cluster = cluster_factory(**dict(self.cluster_kwargs))
+        resolved_cluster_kwargs = _prepare_cluster_kwargs(cluster_factory, self.cluster_kwargs)
+        cluster = cluster_factory(**resolved_cluster_kwargs)
         try:
             client = Client(cluster, **dict(self.client_kwargs))
             self._verify_client_if_requested(client)
