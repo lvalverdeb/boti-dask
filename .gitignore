@@ -17,6 +17,5 @@ __pycache__/
 dist/
 build/
 *.egg/
-*.egg-info/
-*.egg-info/
-*.egg-info/
+*.egg-info
+uv.lock
