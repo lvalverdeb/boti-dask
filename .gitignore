@@ -17,5 +17,3 @@ dist/
 build/
 *.egg/
 *.egg-info
-uv.lock
-*.ipynb
