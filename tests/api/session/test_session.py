@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import dask
-import pytest
 import threading
 from concurrent.futures import ThreadPoolExecutor
+
+import dask
+import pytest
 
 from boti_dask import session as session_module
 from boti_dask.session import (
@@ -83,21 +84,18 @@ def test_release_shared_session_is_safe_under_concurrent_release_calls():
     client = _CloseSpy()
     cluster = _CloseSpy()
 
-    session_module._register_shared_session(key, client=client, cluster=cluster)
-    with session_module._REGISTRY_LOCK:
-        assert key in session_module._SHARED_SESSION_REGISTRY
-        session_module._SHARED_SESSION_REGISTRY[key]["ref_count"] = 8
+    session_module.pool.register_shared_session(key, client=client, cluster=cluster)
+    session_module.pool.debug_set_shared_ref_count(key, 8)
 
     def release_once() -> None:
-        session_module._release_shared_session(key)
+        session_module.pool.release_shared_session(key)
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = [pool.submit(release_once) for _ in range(8)]
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(release_once) for _ in range(8)]
         for future in futures:
             future.result()
 
-    with session_module._REGISTRY_LOCK:
-        assert key not in session_module._SHARED_SESSION_REGISTRY
+    assert key not in session_module.pool.debug_shared_session_keys()
 
     assert client.close_count == 1
     assert cluster.close_count == 1
@@ -170,5 +168,3 @@ def test_prepare_cluster_kwargs_preserves_explicit_dashboard_address():
 
     assert explicit["dashboard_address"] == ":8789"
     assert explicit_none["dashboard_address"] is None
-
-

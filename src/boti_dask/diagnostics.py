@@ -1,26 +1,25 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 import dask.dataframe as dd
 import pandas as pd
-import polars as pl
-import pyarrow as pa
+
+try:
+    import pyarrow as pa
+except ImportError:
+    pa = None
+
+try:
+    import polars as pl
+except ImportError:
+    pl = None
+
+from boti.core.logger import Logger
 
 
-@runtime_checkable
-class LoggerLike(Protocol):
-    """Protocol for loggers compatible with boti.Logger."""
-
-    def debug(self, msg: str, *args: Any, **kwargs: Any) -> None: ...
-    def info(self, msg: str, *args: Any, **kwargs: Any) -> None: ...
-    def warning(self, msg: str, *args: Any, **kwargs: Any) -> None: ...
-    def error(self, msg: str, *args: Any, **kwargs: Any) -> None: ...
-    def critical(self, msg: str, *args: Any, **kwargs: Any) -> None: ...
-
-
-def _log(logger: LoggerLike | None, level: str, message: str) -> None:
+def _log(logger: Any | None, level: str, message: str) -> None:
     if logger is None:
         return
     log_fn = getattr(logger, level, None)
@@ -32,7 +31,7 @@ def _has_dask_graph(obj: Any) -> bool:
     return hasattr(obj, "__dask_graph__")
 
 
-def inspect_graph(obj: Any, *, logger: LoggerLike | None = None) -> dict[str, Any]:
+def inspect_graph(obj: Any, *, logger: Any | None = None) -> dict[str, Any]:
     """Return compact Dask graph metrics for diagnostics and dry-run usage."""
     if not _has_dask_graph(obj):
         metrics = {"type": type(obj).__name__, "is_dask": False}
@@ -74,13 +73,13 @@ def describe_frame(frame: Any) -> dict[str, Any]:
             "rows": len(frame.index),
             "columns": len(frame.columns),
         }
-    if isinstance(frame, pa.Table):
+    if pa is not None and isinstance(frame, pa.Table):
         return {
             "engine": "arrow",
             "rows": frame.num_rows,
             "columns": len(frame.column_names),
         }
-    if isinstance(frame, pl.DataFrame):
+    if pl is not None and isinstance(frame, pl.DataFrame):
         return {
             "engine": "polars",
             "rows": frame.height,
@@ -89,22 +88,17 @@ def describe_frame(frame: Any) -> dict[str, Any]:
     return {"engine": type(frame).__name__}
 
 
-def diagnostics_logger(logger: LoggerLike | None, *, name: str) -> LoggerLike:
-    """Return provided logger or a stdlib fallback logger scoped by name."""
+def diagnostics_logger(logger: Any | None, *, name: str) -> Any:
+    """Return provided logger or a :class:`boti.Logger` fallback scoped by *name*."""
     if logger is not None:
         return logger
-    import logging
-
-    resolved = logging.getLogger(name)
-    if not resolved.handlers:
-        resolved.addHandler(logging.StreamHandler())
-    return resolved
+    return Logger.default_logger(logger_name=name)
 
 
 class UniqueValuesExtractor:
     """Best-effort unique value extraction for Dask-backed columns."""
 
-    def __init__(self, *, dask_client: Any | None = None, logger: LoggerLike | None = None) -> None:
+    def __init__(self, *, dask_client: Any | None = None, logger: Any | None = None) -> None:
         self.dask_client = dask_client
         self.logger = logger
 
@@ -137,6 +131,13 @@ class UniqueValuesExtractor:
         *columns: str,
         limit: int = 100_000,
     ) -> dict[str, list[Any]]:
+        from .resilience import safe_persist
+
+        if self.dask_client is not None:
+            frame = safe_persist(frame, dask_client=self.dask_client, logger=self.logger)
+        else:
+            frame = frame.persist()
+        _log(self.logger, "info", f"Persisted {frame.npartitions}-partition frame for unique extraction.")
         pairs = await asyncio.gather(
             *(asyncio.to_thread(self._extract_one, frame, column, limit) for column in columns)
         )
@@ -149,4 +150,3 @@ __all__ = [
     "diagnostics_logger",
     "inspect_graph",
 ]
-

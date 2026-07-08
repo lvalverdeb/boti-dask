@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import gc
+
 import dask
 import dask.dataframe as dd
-import gc
 import pandas as pd
 import pytest
 

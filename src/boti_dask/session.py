@@ -17,11 +17,13 @@ import dask.dataframe as dd
 
 try:
     from dask.distributed import Client, LocalCluster, get_client
-except ImportError:  # pragma: no cover
-    Client = None  # type: ignore[assignment]
-    LocalCluster = None  # type: ignore[assignment]
-    get_client = None  # type: ignore[assignment]
+except ImportError:
+    Client = None
+    LocalCluster = None
+    get_client = None
 
+from boti.core.managed_resource import ManagedResource
+from boti.core.models import ResourceConfig
 
 _RECOMMENDED_DASK_CONFIG = {
     "distributed.comm.timeouts.connect": "20s",
@@ -35,60 +37,159 @@ _RECOMMENDED_DASK_CONFIG = {
     "dataframe.shuffle.method": "tasks",
 }
 
-_MANAGED_CLIENT_REGISTRY: dict[int, weakref.ReferenceType[Any]] = {}
-_PERSISTED_COLLECTION_REGISTRY: dict[int, list[weakref.ReferenceType[Any]]] = {}
-_SHARED_SESSION_REGISTRY: dict[str, dict[str, Any]] = {}
-_REGISTRY_LOCK = threading.RLock()
-
 _ENV_PREFIX_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*_?$")
 
 
-# Internal helpers are intentionally module-level so resilience helpers can share state.
-def _register_managed_client(client: Any) -> None:
-    with _REGISTRY_LOCK:
-        _MANAGED_CLIENT_REGISTRY[id(client)] = weakref.ref(client)
+# ---------------------------------------------------------------------------
+# SessionPool — replaces module-level registries
+# ---------------------------------------------------------------------------
+
+class SessionPool:
+    """Manages Dask client, cluster, and persisted-collection registries.
+
+    A module-level singleton replaces the previous bare module-level dicts.
+    """
+
+    def __init__(self) -> None:
+        self._managed_clients: dict[int, weakref.ReferenceType[Any]] = {}
+        self._persisted_collections: dict[int, list[weakref.ReferenceType[Any]]] = {}
+        self._shared_sessions: dict[str, dict[str, Any]] = {}
+        self._lock = threading.RLock()
+
+    # -- managed client helpers ------------------------------------------------
+
+    def register_managed_client(self, client: Any) -> None:
+        with self._lock:
+            self._managed_clients[id(client)] = weakref.ref(client)
+
+    def unregister_managed_client(self, client: Any) -> None:
+        client_id = id(client)
+        with self._lock:
+            self._managed_clients.pop(client_id, None)
+            self._persisted_collections.pop(client_id, None)
+
+    def is_client_registered(self, client: Any) -> bool:
+        with self._lock:
+            return id(client) in self._managed_clients
+
+    # -- persisted collection tracking -----------------------------------------
+
+    def track_persisted_collection(self, obj: Any, client: Any | None) -> None:
+        if client is None or not _is_dask_dataframe_like(obj):
+            return
+        client_id = id(client)
+        with self._lock:
+            if client_id not in self._managed_clients:
+                return
+        try:
+            setattr(obj, "_boti_managed_persisted", True)
+        except Exception:
+            pass
+        try:
+            ref = weakref.ref(obj)
+        except TypeError:
+            return
+        with self._lock:
+            self._persisted_collections.setdefault(client_id, []).append(ref)
+
+    def live_persisted_collection_count(self, client: Any) -> int:
+        client_id = id(client)
+        with self._lock:
+            refs = self._persisted_collections.get(client_id, [])
+            live = [ref for ref in refs if ref() is not None]
+            if live:
+                self._persisted_collections[client_id] = live
+            else:
+                self._persisted_collections.pop(client_id, None)
+        return len(live)
+
+    # -- shared session helpers ------------------------------------------------
+
+    def register_shared_session(self, key: str, *, client: Any, cluster: Any | None) -> None:
+        self.register_managed_client(client)
+        with self._lock:
+            self._shared_sessions[key] = {
+                "client": client,
+                "cluster": cluster,
+                "ref_count": 1,
+            }
+
+    def get_shared_session(self, key: str) -> dict[str, Any] | None:
+        with self._lock:
+            entry = self._shared_sessions.get(key)
+            return dict(entry) if entry is not None else None
+
+    def try_acquire_shared_session(self, key: str) -> dict[str, Any] | None:
+        """Atomically check for a shared session and increment ref_count.
+
+        Returns a dict with ``client`` / ``cluster`` keys if acquired,
+        or ``None`` if the session does not exist or the client is gone.
+        """
+        with self._lock:
+            entry = self._shared_sessions.get(key)
+            if entry is None:
+                return None
+            client = entry.get("client")
+            if not _is_running_client(client):
+                self._shared_sessions.pop(key, None)
+                return None
+            entry["ref_count"] = int(entry.get("ref_count", 0)) + 1
+            return {"client": client, "cluster": entry.get("cluster")}
+
+    def release_shared_session(self, key: str, *, logger: Any | None = None) -> None:
+        client: Any | None = None
+        cluster: Any | None = None
+        with self._lock:
+            entry = self._shared_sessions.get(key)
+            if entry is None:
+                return
+            entry["ref_count"] = int(entry.get("ref_count", 0)) - 1
+            if entry["ref_count"] > 0:
+                _log(logger, "debug", f"Released shared Dask session key={key!r}; ref_count={entry['ref_count']}")
+                return
+            client = entry.get("client")
+            cluster = entry.get("cluster")
+            self._shared_sessions.pop(key, None)
+
+        if client is not None:
+            live = self.live_persisted_collection_count(client)
+            if live:
+                msg = (
+                    "Closing shared Dask session with "
+                    f"{live} live persisted collection(s). "
+                    "Those collections will become unusable after the session closes; "
+                    "compute or preview inside the shared session, or keep another shared holder open."
+                )
+                warnings.warn(msg, RuntimeWarning, stacklevel=3)
+                _log(logger, "warning", msg)
+            try:
+                client.close()
+            finally:
+                self.unregister_managed_client(client)
+        if cluster is not None:
+            cluster.close()
+
+    # -- testing helpers -------------------------------------------------------
+
+    def debug_set_shared_ref_count(self, key: str, count: int) -> None:
+        with self._lock:
+            if key in self._shared_sessions:
+                self._shared_sessions[key]["ref_count"] = count
+
+    def debug_shared_session_keys(self) -> list[str]:
+        with self._lock:
+            return list(self._shared_sessions)
 
 
-def _unregister_managed_client(client: Any) -> None:
-    client_id = id(client)
-    with _REGISTRY_LOCK:
-        _MANAGED_CLIENT_REGISTRY.pop(client_id, None)
-        _PERSISTED_COLLECTION_REGISTRY.pop(client_id, None)
+pool = SessionPool()
 
+
+# ---------------------------------------------------------------------------
+# Module-level helpers (shared state handled via pool)
+# ---------------------------------------------------------------------------
 
 def _is_dask_dataframe_like(obj: Any) -> bool:
     return isinstance(obj, (dd.DataFrame, dd.Series)) or hasattr(obj, "_meta")
-
-
-def _track_persisted_collection(obj: Any, client: Any | None) -> None:
-    if client is None or not _is_dask_dataframe_like(obj):
-        return
-    client_id = id(client)
-    with _REGISTRY_LOCK:
-        if client_id not in _MANAGED_CLIENT_REGISTRY:
-            return
-    try:
-        setattr(obj, "_boti_managed_persisted", True)
-    except Exception:
-        pass
-    try:
-        ref = weakref.ref(obj)
-    except TypeError:
-        return
-    with _REGISTRY_LOCK:
-        _PERSISTED_COLLECTION_REGISTRY.setdefault(client_id, []).append(ref)
-
-
-def _live_persisted_collection_count(client: Any) -> int:
-    client_id = id(client)
-    with _REGISTRY_LOCK:
-        refs = _PERSISTED_COLLECTION_REGISTRY.get(client_id, [])
-        live_refs = [ref for ref in refs if ref() is not None]
-        if live_refs:
-            _PERSISTED_COLLECTION_REGISTRY[client_id] = live_refs
-        else:
-            _PERSISTED_COLLECTION_REGISTRY.pop(client_id, None)
-    return len(live_refs)
 
 
 def _log(logger: Any | None, level: str, message: str) -> None:
@@ -122,54 +223,39 @@ def _verify_client_connection(client: Any) -> None:
 def _prepare_cluster_kwargs(cluster_factory: Any, cluster_kwargs: Mapping[str, Any]) -> dict[str, Any]:
     resolved = dict(cluster_kwargs)
     if cluster_factory is LocalCluster and "dashboard_address" not in resolved:
-        # Use an ephemeral dashboard port to avoid default 8787 contention in parallel runs.
         resolved["dashboard_address"] = ":0"
     return resolved
 
 
+# Backward-compat aliases — delegate to the module-level pool singleton.
+
+def _register_managed_client(client: Any) -> None:
+    pool.register_managed_client(client)
+
+
+def _unregister_managed_client(client: Any) -> None:
+    pool.unregister_managed_client(client)
+
+
+def _track_persisted_collection(obj: Any, client: Any | None) -> None:
+    pool.track_persisted_collection(obj, client)
+
+
+def _live_persisted_collection_count(client: Any) -> int:
+    return pool.live_persisted_collection_count(client)
+
+
 def _register_shared_session(key: str, *, client: Any, cluster: Any | None) -> None:
-    _register_managed_client(client)
-    with _REGISTRY_LOCK:
-        _SHARED_SESSION_REGISTRY[key] = {
-            "client": client,
-            "cluster": cluster,
-            "ref_count": 1,
-        }
+    pool.register_shared_session(key, client=client, cluster=cluster)
 
 
 def _release_shared_session(key: str, *, logger: Any | None = None) -> None:
-    client: Any | None = None
-    cluster: Any | None = None
-    with _REGISTRY_LOCK:
-        entry = _SHARED_SESSION_REGISTRY.get(key)
-        if entry is None:
-            return
-        entry["ref_count"] = int(entry.get("ref_count", 0)) - 1
-        if entry["ref_count"] > 0:
-            _log(logger, "debug", f"Released shared Dask session key={key!r}; ref_count={entry['ref_count']}")
-            return
-        client = entry.get("client")
-        cluster = entry.get("cluster")
-        _SHARED_SESSION_REGISTRY.pop(key, None)
+    pool.release_shared_session(key, logger=logger)
 
-    if client is not None:
-        live_collections = _live_persisted_collection_count(client)
-        if live_collections:
-            message = (
-                "Closing shared Dask session with "
-                f"{live_collections} live persisted collection(s). "
-                "Those collections will become unusable after the session closes; "
-                "compute or preview inside the shared session, or keep another shared holder open."
-            )
-            warnings.warn(message, RuntimeWarning, stacklevel=3)
-            _log(logger, "warning", message)
-        try:
-            client.close()
-        finally:
-            _unregister_managed_client(client)
-    if cluster is not None:
-        cluster.close()
 
+# ---------------------------------------------------------------------------
+# Public helpers (unchanged API)
+# ---------------------------------------------------------------------------
 
 def describe_client(client: Any) -> dict[str, Any]:
     try:
@@ -261,6 +347,11 @@ def _load_dotenv_values(env_file: str | Path | None) -> dict[str, str]:
     return values
 
 
+# ---------------------------------------------------------------------------
+# DaskSessionSettings (unchanged)
+# ---------------------------------------------------------------------------
+
+
 @dataclass(slots=True)
 class DaskSessionSettings:
     scheduler_address: str | None = None
@@ -317,37 +408,75 @@ class DaskSessionSettings:
         return payload
 
 
-@dataclass(slots=True)
-class DaskSession:
-    client: Any | None = None
-    scheduler_address: str | None = None
-    cluster_factory: Callable[..., Any] | None = None
-    cluster_kwargs: Mapping[str, Any] = field(default_factory=dict)
-    client_kwargs: Mapping[str, Any] = field(default_factory=dict)
-    logger: Any | None = None
-    shared: bool = False
-    shared_key: str | None = None
-    verify_connectivity: bool = False
+# ---------------------------------------------------------------------------
+# DaskSession — ManagedResource subclass
+# ---------------------------------------------------------------------------
 
-    _cluster: Any | None = field(init=False, default=None)
-    _owns_client: bool = field(init=False, default=False)
-    _owns_cluster: bool = field(init=False, default=False)
-    _shared_session_key: str | None = field(init=False, default=None)
+class DaskSession(ManagedResource):
+    """A Dask distributed session backed by a :class:`ManagedResource` lifecycle.
 
-    def __enter__(self) -> Any:
+    Accepts an existing client, connects to a scheduler address, or creates a
+    local cluster.  Supports shared (multi-holder) and managed (single-holder)
+    session patterns.
+    """
+
+    def __init__(
+        self,
+        client: Any | None = None,
+        scheduler_address: str | None = None,
+        cluster_factory: Callable[..., Any] | None = None,
+        cluster_kwargs: Mapping[str, Any] | None = None,
+        client_kwargs: Mapping[str, Any] | None = None,
+        logger: Any | None = None,
+        shared: bool = False,
+        shared_key: str | None = None,
+        verify_connectivity: bool = False,
+        config: ResourceConfig | None = None,
+        verbose: bool = False,
+        debug: bool = False,
+    ) -> None:
+        if config is None:
+            config = ResourceConfig(
+                logger=logger,
+                verbose=verbose,
+                debug=debug,
+                skip_logger=logger is None,
+            )
+        elif logger is not None:
+            config.logger = logger
+            config.skip_logger = False
+
+        super().__init__(config=config)
+
+        self.client = client
+        self.scheduler_address = scheduler_address
+        self.cluster_factory = cluster_factory
+        self.cluster_kwargs = dict(cluster_kwargs or {})
+        self.client_kwargs = dict(client_kwargs or {})
+        self.shared = shared
+        self.shared_key = shared_key
+        self.verify_connectivity = verify_connectivity
+
+        # Runtime state
+        self._cluster: Any | None = None
+        self._owns_client: bool = False
+        self._owns_cluster: bool = False
+        self._shared_session_key: str | None = None
+
+    # -- context manager (overrides ManagedResource @final to return client) --
+    # The @final decorator on ManagedResource.__enter__ is a type-checker hint
+    # only — not enforced at runtime.  We override to preserve the existing
+    # ``with session as client`` pattern.
+
+    def __enter__(self) -> Any:  # type: ignore[override]
+        self._assert_open()
         return self.open()
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        self.close()
-
-    async def __aenter__(self) -> Any:
+    async def __aenter__(self) -> Any:  # type: ignore[override]
+        self._assert_open()
         return await asyncio.to_thread(self.open)
 
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        await self.aclose()
-
-    def _log(self, level: str, message: str) -> None:
-        _log(self.logger, level, message)
+    # -- internal helpers ------------------------------------------------------
 
     def _shared_key(self) -> str:
         if self.shared_key is not None:
@@ -369,12 +498,16 @@ class DaskSession:
         if not self.verify_connectivity:
             return
         _verify_client_connection(client)
-        self._log("info", f"Verified Dask client connectivity {describe_client(client)}")
+        if self.logger is not None:
+            self.logger.info(f"Verified Dask client connectivity {describe_client(client)}")
+
+    # -- open / cleanup --------------------------------------------------------
 
     def open(self) -> Any:
         if self.client is not None:
             self._verify_client_if_requested(self.client)
-            self._log("debug", f"Using external Dask client {describe_client(self.client)}")
+            if self.logger is not None:
+                self.logger.debug(f"Using external Dask client {describe_client(self.client)}")
             return self.client
 
         if Client is None:
@@ -382,42 +515,45 @@ class DaskSession:
 
         if self.shared:
             session_key = self._shared_key()
-            with _REGISTRY_LOCK:
-                shared_entry = _SHARED_SESSION_REGISTRY.get(session_key)
-                if shared_entry is not None:
-                    client = shared_entry.get("client")
-                    if _is_running_client(client):
-                        shared_entry["ref_count"] = int(shared_entry.get("ref_count", 0)) + 1
-                        cluster = shared_entry.get("cluster")
-                    else:
-                        _SHARED_SESSION_REGISTRY.pop(session_key, None)
-                        client = None
-                        cluster = None
-                else:
-                    client = None
-                    cluster = None
-
-            if client is not None:
+            acquired = pool.try_acquire_shared_session(session_key)
+            if acquired is not None:
+                client = acquired["client"]
+                cluster = acquired["cluster"]
                 self.client = client
                 self._cluster = cluster
                 self._shared_session_key = session_key
-                self._verify_client_if_requested(client)
-                self._log("info", f"Reusing shared Dask session {describe_client(client)} key={session_key!r}")
+                try:
+                    self._verify_client_if_requested(client)
+                except Exception:
+                    pool.release_shared_session(session_key, logger=self.logger)
+                    self.client = None
+                    self._cluster = None
+                    self._shared_session_key = None
+                    raise
+                if self.logger is not None:
+                    self.logger.info(f"Reusing shared Dask session {describe_client(client)} key={session_key!r}")
                 return client
 
         if self.scheduler_address is not None:
             client = Client(self.scheduler_address, **dict(self.client_kwargs))
-            self._verify_client_if_requested(client)
             if self.shared:
-                _register_shared_session(self._shared_key(), client=client, cluster=None)
+                pool.register_shared_session(self._shared_key(), client=client, cluster=None)
                 self.client = client
                 self._shared_session_key = self._shared_key()
-                self._log("info", f"Connected shared Dask client to {describe_client(client)}")
-                return client
-            self.client = client
-            self._owns_client = True
-            _register_managed_client(client)
-            self._log("info", f"Connected Dask client to {describe_client(client)}")
+            else:
+                self.client = client
+                self._owns_client = True
+                pool.register_managed_client(client)
+            try:
+                self._verify_client_if_requested(client)
+            except Exception:
+                self.close()
+                raise
+            if self.logger is not None:
+                if self.shared:
+                    self.logger.info(f"Connected shared Dask client to {describe_client(client)}")
+                else:
+                    self.logger.info(f"Connected Dask client to {describe_client(client)}")
             return client
 
         cluster_factory = self.cluster_factory or LocalCluster
@@ -428,31 +564,42 @@ class DaskSession:
         cluster = cluster_factory(**resolved_cluster_kwargs)
         try:
             client = Client(cluster, **dict(self.client_kwargs))
-            self._verify_client_if_requested(client)
         except Exception:
             cluster.close()
             raise
 
         if self.shared:
-            _register_shared_session(self._shared_key(), client=client, cluster=cluster)
+            pool.register_shared_session(self._shared_key(), client=client, cluster=cluster)
             self.client = client
             self._cluster = cluster
             self._shared_session_key = self._shared_key()
-            self._log("info", f"Started shared Dask session {describe_client(client)}")
-            return client
+        else:
+            self._cluster = cluster
+            self._owns_cluster = True
+            self.client = client
+            self._owns_client = True
+            pool.register_managed_client(client)
 
-        self._cluster = cluster
-        self._owns_cluster = True
-        self.client = client
-        self._owns_client = True
-        _register_managed_client(client)
-        self._log("info", f"Started managed Dask session {describe_client(client)}")
+        try:
+            self._verify_client_if_requested(client)
+        except Exception:
+            self.close()
+            raise
+
+        if self.logger is not None:
+            if self.shared:
+                self.logger.info(f"Started shared Dask session {describe_client(client)}")
+            else:
+                self.logger.info(f"Started managed Dask session {describe_client(client)}")
         return client
 
-    def close(self) -> None:
+    def _cleanup(self) -> None:
+        """Release Dask resources. Called by :meth:`ManagedResource.close`."""
+
+        # Shared session: decrement ref count; only close when it hits zero.
         if self._shared_session_key is not None and self.client is not None:
             try:
-                _release_shared_session(self._shared_session_key, logger=self.logger)
+                pool.release_shared_session(self._shared_session_key, logger=self.logger)
             finally:
                 self.client = None
                 self._cluster = None
@@ -461,23 +608,25 @@ class DaskSession:
                 self._owns_cluster = False
             return
 
+        # Managed session: close client + cluster.
         try:
             if self._owns_client and self.client is not None:
-                live_collections = _live_persisted_collection_count(self.client)
-                if live_collections:
-                    message = (
+                live = pool.live_persisted_collection_count(self.client)
+                if live:
+                    msg = (
                         "Closing managed Dask session with "
-                        f"{live_collections} live persisted collection(s). "
+                        f"{live} live persisted collection(s). "
                         "Those collections will become unusable after the session closes; "
                         "compute or preview them inside the session, or keep the client open. "
                         "Later head()/compute() calls may fail with Missing dependency."
                     )
-                    warnings.warn(message, RuntimeWarning, stacklevel=2)
-                    self._log("warning", message)
+                    warnings.warn(msg, RuntimeWarning, stacklevel=2)
+                    if self.logger is not None:
+                        self.logger.warning(msg)
                 self.client.close()
         finally:
             if self.client is not None:
-                _unregister_managed_client(self.client)
+                pool.unregister_managed_client(self.client)
             self.client = None
             self._owns_client = False
             if self._owns_cluster and self._cluster is not None:
@@ -485,8 +634,10 @@ class DaskSession:
             self._cluster = None
             self._owns_cluster = False
 
-    async def aclose(self) -> None:
-        await asyncio.to_thread(self.close)
+    async def _acleanup(self) -> None:
+        await asyncio.to_thread(self._cleanup)
+
+    # -- factory helpers -------------------------------------------------------
 
     @classmethod
     def from_env_prefix(
@@ -518,11 +669,12 @@ def dask_session(**kwargs: Any) -> DaskSession:
 __all__ = [
     "DaskSession",
     "DaskSessionSettings",
+    "SessionPool",
     "apply_recommended_dask_config",
     "current_client_summary",
     "dask_session",
     "dask_session_from_env_prefix",
     "describe_client",
+    "pool",
     "recommended_dask_config",
 ]
-

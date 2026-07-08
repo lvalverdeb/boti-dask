@@ -6,34 +6,38 @@ from collections.abc import Callable
 from typing import Any
 
 import dask.dataframe as dd
-import numpy as np
 import pandas as pd
 
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
 from .diagnostics import inspect_graph
-from .session import _track_persisted_collection
+from .session import pool
 
 try:
     from dask.distributed import get_client
     from dask.distributed import wait as distributed_wait
-except ImportError:  # pragma: no cover
-    get_client = None  # type: ignore[assignment]
+except ImportError:
+    get_client = None
 
     def distributed_wait(*_args: Any, **_kwargs: Any) -> None:
         return None
 
 try:
-    from distributed.comm.core import CommClosedError  # type: ignore
-except ImportError:  # pragma: no cover
+    from distributed.comm.core import CommClosedError
+except ImportError:
 
-    class CommClosedError(Exception):  # type: ignore[no-redef]
+    class CommClosedError(Exception):
         pass
 
 
 try:
-    from tornado.iostream import StreamClosedError  # type: ignore
-except ImportError:  # pragma: no cover
+    from tornado.iostream import StreamClosedError
+except ImportError:
 
-    class StreamClosedError(Exception):  # type: ignore[no-redef]
+    class StreamClosedError(Exception):
         pass
 
 
@@ -92,7 +96,6 @@ def _resolve_active_client(provided_client: Any | None = None) -> Any | None:
     except Exception:
         return None
     return current if _is_running_client(current) else None
-
 
 
 def _translate_orphaned_graph_error(*, operation_name: str, obj: Any, exc: Exception) -> Exception:
@@ -255,7 +258,7 @@ def safe_persist(
         remote_op=_sync_client_persist,
         local_op=_sync_local_persist,
     )
-    _track_persisted_collection(result, _resolve_active_client(dask_client))
+    pool.track_persisted_collection(result, _resolve_active_client(dask_client))
     return result
 
 
@@ -337,19 +340,42 @@ def safe_gather(
 
 
 def _to_int_safe(value: Any, default: int = 0) -> int:
+    """Convert *value* to int, returning *default* on failure.
+
+    Handles ``numpy`` scalar types gracefully when numpy is not installed.
+    """
     if value is None:
         return default
-    if isinstance(value, (int, np.integer)):
+    if isinstance(value, int):
         return int(value)
-    if isinstance(value, (float, np.floating)):
-        if np.isnan(value):
+    if isinstance(value, float):
+        if np is not None and np.isnan(value):
             return default
         return int(value)
-    if isinstance(value, (list, tuple, np.ndarray, pd.Series, pd.Index)):
-        array = np.asarray(value)
-        if array.size == 0:
+    if isinstance(value, (tuple, list)):
+        if not value:
             return default
-        return _to_int_safe(array.ravel()[0], default=default)
+        if np is not None:
+            try:
+                array = np.asarray(value)
+                if array.size == 0:
+                    return default
+                return _to_int_safe(array.ravel()[0], default=default)
+            except Exception:
+                pass
+        return _to_int_safe(value[0], default=default)
+    if isinstance(value, (pd.Series, pd.Index)):
+        if len(value) == 0:
+            return default
+        if np is not None:
+            try:
+                array = np.asarray(value)
+                if array.size == 0:
+                    return default
+                return _to_int_safe(array.ravel()[0], default=default)
+            except Exception:
+                pass
+        return _to_int_safe(value.iloc[0], default=default)
     result = getattr(value, "item", None)
     if callable(result):
         try:
@@ -508,4 +534,3 @@ __all__ = [
     "safe_persist",
     "safe_wait",
 ]
-
