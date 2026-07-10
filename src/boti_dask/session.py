@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import threading
@@ -84,7 +85,7 @@ class SessionPool:
         try:
             setattr(obj, "_boti_managed_persisted", True)
         except Exception:
-            pass
+            _module_log.debug("Failed to mark persisted collection", exc_info=True)
         try:
             ref = weakref.ref(obj)
         except TypeError:
@@ -200,6 +201,11 @@ def _log(logger: Any | None, level: str, message: str) -> None:
         log_fn(message)
 
 
+# Module-level fallback for free functions with no caller-supplied logger.
+# Debug level only — these are expected/best-effort paths.
+_module_log = logging.getLogger(__name__)
+
+
 def _stable_mapping_repr(value: Mapping[str, Any]) -> str:
     return repr(sorted((str(key), repr(item)) for key, item in value.items()))
 
@@ -261,6 +267,7 @@ def describe_client(client: Any) -> dict[str, Any]:
     try:
         info = client.scheduler_info()
     except Exception:
+        _module_log.debug("client.scheduler_info() failed in describe_client", exc_info=True)
         info = {}
     workers = info.get("workers", {}) if isinstance(info, dict) else {}
     scheduler = getattr(getattr(client, "cluster", None), "scheduler_address", None)
@@ -280,6 +287,7 @@ def current_client_summary() -> dict[str, Any] | None:
     try:
         return describe_client(get_client())
     except Exception:
+        _module_log.debug("describe_client(get_client()) failed in current_client_summary", exc_info=True)
         return None
 
 
@@ -499,7 +507,7 @@ class DaskSession(ManagedResource):
             return
         _verify_client_connection(client)
         if self.logger is not None:
-            self.logger.info(f"Verified Dask client connectivity {describe_client(client)}")
+            self.logger.info("Verified Dask client connectivity %s", describe_client(client))
 
     # -- open / cleanup --------------------------------------------------------
 
@@ -507,7 +515,7 @@ class DaskSession(ManagedResource):
         if self.client is not None:
             self._verify_client_if_requested(self.client)
             if self.logger is not None:
-                self.logger.debug(f"Using external Dask client {describe_client(self.client)}")
+                self.logger.debug("Using external Dask client %s", describe_client(self.client))
             return self.client
 
         if Client is None:
@@ -531,7 +539,7 @@ class DaskSession(ManagedResource):
                     self._shared_session_key = None
                     raise
                 if self.logger is not None:
-                    self.logger.info(f"Reusing shared Dask session {describe_client(client)} key={session_key!r}")
+                    self.logger.info("Reusing shared Dask session %s key=%r", describe_client(client), session_key)
                 return client
 
         if self.scheduler_address is not None:
@@ -551,9 +559,9 @@ class DaskSession(ManagedResource):
                 raise
             if self.logger is not None:
                 if self.shared:
-                    self.logger.info(f"Connected shared Dask client to {describe_client(client)}")
+                    self.logger.info("Connected shared Dask client to %s", describe_client(client))
                 else:
-                    self.logger.info(f"Connected Dask client to {describe_client(client)}")
+                    self.logger.info("Connected Dask client to %s", describe_client(client))
             return client
 
         cluster_factory = self.cluster_factory or LocalCluster
@@ -588,9 +596,9 @@ class DaskSession(ManagedResource):
 
         if self.logger is not None:
             if self.shared:
-                self.logger.info(f"Started shared Dask session {describe_client(client)}")
+                self.logger.info("Started shared Dask session %s", describe_client(client))
             else:
-                self.logger.info(f"Started managed Dask session {describe_client(client)}")
+                self.logger.info("Started managed Dask session %s", describe_client(client))
         return client
 
     def _cleanup(self) -> None:

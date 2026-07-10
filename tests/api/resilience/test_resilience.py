@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import gc
+import logging
 
 import dask
 import dask.dataframe as dd
 import pandas as pd
 import pytest
 
+from boti_dask import resilience as resilience_module
 from boti_dask.resilience import (
     dask_is_empty,
     dask_is_probably_empty,
@@ -91,4 +93,98 @@ def test_dask_empty_heuristics():
     assert dask_is_probably_empty(empty_ddf) is False
     assert dask_is_empty(empty_ddf) is True
     assert dask_is_empty(non_empty_ddf) is False
+
+
+def test_resolve_active_client_logs_debug_when_get_client_fails(monkeypatch, caplog):
+    """Regression: _resolve_active_client used to swallow get_client()
+    failures with a bare `except Exception: return None`. It now logs at
+    debug level."""
+
+    def failing_get_client():
+        raise RuntimeError("no active client")
+
+    monkeypatch.setattr(resilience_module, "get_client", failing_get_client)
+
+    with caplog.at_level(logging.DEBUG, logger="boti_dask.resilience"):
+        result = resilience_module._resolve_active_client()
+
+    assert result is None
+    assert any(
+        "get_client() failed while resolving active Dask client" in record.message
+        for record in caplog.records
+    )
+
+
+def test_to_int_safe_logs_debug_when_numpy_fast_path_fails_for_list(monkeypatch, caplog):
+    """Regression: the numpy fast path in _to_int_safe used to swallow
+    np.asarray() failures for tuple/list input with a bare `except
+    Exception: pass`, silently falling back to the slow path. It now logs
+    at debug level while still falling back correctly."""
+
+    def broken_asarray(*_args, **_kwargs):
+        raise RuntimeError("numpy broke")
+
+    monkeypatch.setattr(resilience_module.np, "asarray", broken_asarray)
+
+    with caplog.at_level(logging.DEBUG, logger="boti_dask.resilience"):
+        result = resilience_module._to_int_safe((5,))
+
+    assert result == 5
+    assert any(
+        "numpy fast path failed for tuple/list value" in record.message
+        for record in caplog.records
+    )
+
+
+def test_to_int_safe_logs_debug_when_numpy_fast_path_fails_for_series(monkeypatch, caplog):
+    """Same regression as above, for the pd.Series/Index branch."""
+
+    def broken_asarray(*_args, **_kwargs):
+        raise RuntimeError("numpy broke")
+
+    monkeypatch.setattr(resilience_module.np, "asarray", broken_asarray)
+
+    with caplog.at_level(logging.DEBUG, logger="boti_dask.resilience"):
+        result = resilience_module._to_int_safe(pd.Series([7]))
+
+    assert result == 7
+    assert any(
+        "numpy fast path failed for Series/Index value" in record.message
+        for record in caplog.records
+    )
+
+
+def test_to_int_safe_logs_debug_when_item_call_fails(caplog):
+    """Regression: the `.item()` fallback in _to_int_safe used to swallow
+    failures with a bare `except Exception: return default`. It now logs
+    at debug level."""
+
+    class BrokenItem:
+        def item(self):
+            raise RuntimeError("item() broke")
+
+    with caplog.at_level(logging.DEBUG, logger="boti_dask.resilience"):
+        result = resilience_module._to_int_safe(BrokenItem(), default=-1)
+
+    assert result == -1
+    assert any("value.item() failed" in record.message for record in caplog.records)
+
+
+def test_dask_is_probably_empty_logs_debug_when_len_fails(caplog):
+    """Regression: dask_is_probably_empty used to swallow len() failures
+    with a bare `except Exception: return False`. It now logs at debug
+    level."""
+
+    class BadLen:
+        def __len__(self):
+            raise RuntimeError("len() broke")
+
+    with caplog.at_level(logging.DEBUG, logger="boti_dask.resilience"):
+        result = dask_is_probably_empty(BadLen())
+
+    assert result is False
+    assert any(
+        "len() failed in dask_is_probably_empty" in record.message
+        for record in caplog.records
+    )
 

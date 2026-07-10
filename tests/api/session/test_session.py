@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -11,6 +12,7 @@ from boti_dask.session import (
     DaskSession,
     DaskSessionSettings,
     apply_recommended_dask_config,
+    current_client_summary,
     dask_session,
     dask_session_from_env_prefix,
     describe_client,
@@ -142,6 +144,39 @@ def test_dask_session_from_env_prefix_applies_overrides(tmp_path):
     session = dask_session_from_env_prefix("DASK_SESSION_", env_file=env_file, shared=False)
     assert isinstance(session, DaskSession)
     assert session.shared is False
+
+
+def test_describe_client_logs_debug_when_scheduler_info_fails(caplog):
+    """Regression: describe_client used to swallow client.scheduler_info()
+    failures via `except Exception: info = {}`, giving no trace of why
+    workers/threads came back empty. It now logs at debug level."""
+
+    class BrokenClient:
+        def scheduler_info(self):
+            raise RuntimeError("boom")
+
+    with caplog.at_level(logging.DEBUG, logger="boti_dask.session"):
+        summary = describe_client(BrokenClient())
+
+    assert summary["workers"] == 0
+    assert any("scheduler_info() failed" in record.message for record in caplog.records)
+
+
+def test_current_client_summary_logs_debug_when_get_client_fails(monkeypatch, caplog):
+    """Regression: current_client_summary used to swallow
+    describe_client(get_client()) failures with a bare
+    `except Exception: return None`. It now logs at debug level."""
+
+    def failing_get_client():
+        raise RuntimeError("no active client")
+
+    monkeypatch.setattr(session_module, "get_client", failing_get_client)
+
+    with caplog.at_level(logging.DEBUG, logger="boti_dask.session"):
+        result = current_client_summary()
+
+    assert result is None
+    assert any("current_client_summary" in record.message for record in caplog.records)
 
 
 def test_prepare_cluster_kwargs_defaults_dashboard_for_localcluster():

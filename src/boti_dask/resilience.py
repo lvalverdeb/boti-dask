@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -58,6 +59,11 @@ def _log(logger: Any | None, level: str, message: str) -> None:
         log_fn(message)
 
 
+# Module-level fallback for call sites with no caller-supplied logger (e.g.
+# static helpers). Debug level only — these are expected/best-effort paths.
+_module_log = logging.getLogger(__name__)
+
+
 def _has_dask_graph(obj: Any) -> bool:
     return hasattr(obj, "__dask_graph__")
 
@@ -94,6 +100,7 @@ def _resolve_active_client(provided_client: Any | None = None) -> Any | None:
     try:
         current = get_client()
     except Exception:
+        _module_log.debug("get_client() failed while resolving active Dask client", exc_info=True)
         return None
     return current if _is_running_client(current) else None
 
@@ -362,7 +369,7 @@ def _to_int_safe(value: Any, default: int = 0) -> int:
                     return default
                 return _to_int_safe(array.ravel()[0], default=default)
             except Exception:
-                pass
+                _module_log.debug("numpy fast path failed for tuple/list value in _to_int_safe", exc_info=True)
         return _to_int_safe(value[0], default=default)
     if isinstance(value, (pd.Series, pd.Index)):
         if len(value) == 0:
@@ -374,13 +381,14 @@ def _to_int_safe(value: Any, default: int = 0) -> int:
                     return default
                 return _to_int_safe(array.ravel()[0], default=default)
             except Exception:
-                pass
+                _module_log.debug("numpy fast path failed for Series/Index value in _to_int_safe", exc_info=True)
         return _to_int_safe(value.iloc[0], default=default)
     result = getattr(value, "item", None)
     if callable(result):
         try:
             return _to_int_safe(result(), default=default)
         except Exception:
+            _module_log.debug("value.item() failed in _to_int_safe", exc_info=True)
             return default
     try:
         return int(value)
@@ -394,6 +402,7 @@ def dask_is_probably_empty(obj: Any) -> bool:
     try:
         return len(obj) == 0
     except Exception:
+        _module_log.debug("len() failed in dask_is_probably_empty, assuming non-empty", exc_info=True)
         return False
 
 
@@ -410,6 +419,7 @@ def dask_is_empty(
         try:
             return len(obj) == 0
         except Exception:
+            _log(logger, "debug", "len() call failed for non-DataFrame object, returning False")
             return False
 
     partitions = int(getattr(obj, "npartitions", 0) or 0)
