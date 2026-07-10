@@ -6,7 +6,6 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-import dask.dataframe as dd
 import pandas as pd
 
 try:
@@ -14,6 +13,7 @@ try:
 except ImportError:
     np = None  # type: ignore[assignment]
 
+from ._internal import _is_dask_dataframe_like, _is_running_client, _log
 from .diagnostics import inspect_graph
 from .session import pool
 
@@ -51,14 +51,6 @@ RECOVERABLE_DASK_ERRORS = (
 )
 
 
-def _log(logger: Any | None, level: str, message: str) -> None:
-    if logger is None:
-        return
-    log_fn = getattr(logger, level, None)
-    if callable(log_fn):
-        log_fn(message)
-
-
 # Module-level fallback for call sites with no caller-supplied logger (e.g.
 # static helpers). Debug level only — these are expected/best-effort paths.
 _module_log = logging.getLogger(__name__)
@@ -66,10 +58,6 @@ _module_log = logging.getLogger(__name__)
 
 def _has_dask_graph(obj: Any) -> bool:
     return hasattr(obj, "__dask_graph__")
-
-
-def _is_dask_dataframe_like(obj: Any) -> bool:
-    return isinstance(obj, (dd.DataFrame, dd.Series)) or hasattr(obj, "_meta")
 
 
 def _is_dask_collection(obj: Any) -> bool:
@@ -84,12 +72,6 @@ def _contains_dask_collection(obj: Any) -> bool:
     if isinstance(obj, (list, tuple)):
         return any(_contains_dask_collection(value) for value in obj)
     return False
-
-
-def _is_running_client(client: Any | None) -> bool:
-    if client is None:
-        return False
-    return getattr(client, "status", "running") in {"running", "started"}
 
 
 def _resolve_active_client(provided_client: Any | None = None) -> Any | None:

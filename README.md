@@ -7,7 +7,6 @@ Dask runtime/session/resilience utilities for the Boti ecosystem.
 - Session: `docs/api/session.md`
 - Resilience: `docs/api/resilience.md`
 - Diagnostics: `docs/api/diagnostics.md`
-- Migration from `boti_data.distributed`: `docs/migration/from-boti-data-distributed.md`
 
 ## Phase-1 scope
 

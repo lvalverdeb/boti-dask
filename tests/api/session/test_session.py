@@ -103,6 +103,95 @@ def test_release_shared_session_is_safe_under_concurrent_release_calls():
     assert cluster.close_count == 1
 
 
+def test_concurrent_shared_first_open_creates_single_cluster(monkeypatch):
+    """Two threads opening the same shared key concurrently must not both
+    create a cluster: the second waits on the creation lock and reuses."""
+    created: list[object] = []
+    release_factory = threading.Event()
+
+    class StubCluster:
+        def __init__(self) -> None:
+            created.append(self)
+            release_factory.wait(timeout=5)  # hold first opener inside create
+            self.close_count = 0
+
+        def close(self) -> None:
+            self.close_count += 1
+
+    class StubClient:
+        def __init__(self, cluster, **_kwargs) -> None:
+            self.cluster = cluster
+            self.status = "running"
+            self.close_count = 0
+
+        def close(self) -> None:
+            self.close_count += 1
+            self.status = "closed"
+
+    monkeypatch.setattr(session_module, "Client", StubClient)
+
+    key = "concurrent-first-open"
+    sessions = [
+        DaskSession(shared=True, shared_key=key, cluster_factory=StubCluster)
+        for _ in range(2)
+    ]
+    clients: list[object] = []
+    threads = [
+        threading.Thread(target=lambda s=s: clients.append(s.open()))
+        for s in sessions
+    ]
+    try:
+        for t in threads:
+            t.start()
+        release_factory.set()
+        for t in threads:
+            t.join(timeout=5)
+        assert not any(t.is_alive() for t in threads)
+
+        assert len(created) == 1, "both openers created a cluster — race not serialised"
+        assert clients[0] is clients[1]
+
+        entry = session_module.pool.get_shared_session(key)
+        assert entry is not None
+        assert entry["ref_count"] == 2
+    finally:
+        for s in sessions:
+            s.close()
+
+    assert key not in session_module.pool.debug_shared_session_keys()
+    assert clients[0].close_count == 1
+    assert created[0].close_count == 1
+
+
+def test_open_after_close_raises():
+    """open() on a closed session must raise instead of leaking a fresh cluster."""
+    session = DaskSession(client=object())
+    session.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        session.open()
+
+
+def test_pool_prunes_registries_when_client_is_garbage_collected():
+    """Registry entries for GC'd clients are removed so the pool cannot grow
+    unboundedly in long-lived processes."""
+    import gc
+
+    class DummyClient:
+        pass
+
+    client = DummyClient()
+    client_id = id(client)
+    session_module.pool.register_managed_client(client)
+    assert session_module.pool.is_client_registered(client)
+
+    del client
+    gc.collect()
+
+    with session_module.pool._lock:
+        assert client_id not in session_module.pool._managed_clients
+        assert client_id not in session_module.pool._persisted_collections
+
+
 def test_dask_session_settings_from_env_prefix(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(

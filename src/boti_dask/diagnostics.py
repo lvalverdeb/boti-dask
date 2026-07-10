@@ -18,13 +18,7 @@ except ImportError:
 
 from boti.core.logger import Logger
 
-
-def _log(logger: Any | None, level: str, message: str) -> None:
-    if logger is None:
-        return
-    log_fn = getattr(logger, level, None)
-    if callable(log_fn):
-        log_fn(message)
+from ._internal import _log
 
 
 def _has_dask_graph(obj: Any) -> bool:

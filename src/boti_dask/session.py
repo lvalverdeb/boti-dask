@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import dask
-import dask.dataframe as dd
 
 try:
     from dask.distributed import Client, LocalCluster, get_client
@@ -25,6 +24,9 @@ except ImportError:
 
 from boti.core.managed_resource import ManagedResource
 from boti.core.models import ResourceConfig
+from boti.core.settings import load_dotenv_values
+
+from ._internal import _is_dask_dataframe_like, _is_running_client, _log
 
 _RECOMMENDED_DASK_CONFIG = {
     "distributed.comm.timeouts.connect": "20s",
@@ -55,13 +57,26 @@ class SessionPool:
         self._managed_clients: dict[int, weakref.ReferenceType[Any]] = {}
         self._persisted_collections: dict[int, list[weakref.ReferenceType[Any]]] = {}
         self._shared_sessions: dict[str, dict[str, Any]] = {}
+        self._shared_creation_locks: dict[str, threading.Lock] = {}
         self._lock = threading.RLock()
 
     # -- managed client helpers ------------------------------------------------
 
     def register_managed_client(self, client: Any) -> None:
+        client_id = id(client)
+
+        def _prune(ref: weakref.ReferenceType[Any]) -> None:
+            # GC callback: drop registry entries for the collected client so
+            # long-lived processes churning many clients do not accumulate
+            # dead ids. The identity check guards against id() reuse by a
+            # newer client registered under the same address.
+            with self._lock:
+                if self._managed_clients.get(client_id) is ref:
+                    self._managed_clients.pop(client_id, None)
+                    self._persisted_collections.pop(client_id, None)
+
         with self._lock:
-            self._managed_clients[id(client)] = weakref.ref(client)
+            self._managed_clients[client_id] = weakref.ref(client, _prune)
 
     def unregister_managed_client(self, client: Any) -> None:
         client_id = id(client)
@@ -105,6 +120,21 @@ class SessionPool:
         return len(live)
 
     # -- shared session helpers ------------------------------------------------
+
+    def shared_creation_lock(self, key: str) -> threading.Lock:
+        """Per-key lock held by DaskSession.open() across acquire-or-create.
+
+        Without it, two concurrent first opens of the same key both miss
+        ``try_acquire_shared_session`` and both create a cluster; the second
+        ``register_shared_session`` then overwrites the first entry, leaking
+        the first cluster and corrupting the ref count.
+        """
+        with self._lock:
+            lock = self._shared_creation_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._shared_creation_locks[key] = lock
+            return lock
 
     def register_shared_session(self, key: str, *, client: Any, cluster: Any | None) -> None:
         self.register_managed_client(client)
@@ -189,18 +219,6 @@ pool = SessionPool()
 # Module-level helpers (shared state handled via pool)
 # ---------------------------------------------------------------------------
 
-def _is_dask_dataframe_like(obj: Any) -> bool:
-    return isinstance(obj, (dd.DataFrame, dd.Series)) or hasattr(obj, "_meta")
-
-
-def _log(logger: Any | None, level: str, message: str) -> None:
-    if logger is None:
-        return
-    log_fn = getattr(logger, level, None)
-    if callable(log_fn):
-        log_fn(message)
-
-
 # Module-level fallback for free functions with no caller-supplied logger.
 # Debug level only — these are expected/best-effort paths.
 _module_log = logging.getLogger(__name__)
@@ -208,12 +226,6 @@ _module_log = logging.getLogger(__name__)
 
 def _stable_mapping_repr(value: Mapping[str, Any]) -> str:
     return repr(sorted((str(key), repr(item)) for key, item in value.items()))
-
-
-def _is_running_client(client: Any | None) -> bool:
-    if client is None:
-        return False
-    return getattr(client, "status", "running") in {"running", "started"}
 
 
 def _verify_client_connection(client: Any) -> None:
@@ -233,34 +245,8 @@ def _prepare_cluster_kwargs(cluster_factory: Any, cluster_kwargs: Mapping[str, A
     return resolved
 
 
-# Backward-compat aliases — delegate to the module-level pool singleton.
-
-def _register_managed_client(client: Any) -> None:
-    pool.register_managed_client(client)
-
-
-def _unregister_managed_client(client: Any) -> None:
-    pool.unregister_managed_client(client)
-
-
-def _track_persisted_collection(obj: Any, client: Any | None) -> None:
-    pool.track_persisted_collection(obj, client)
-
-
-def _live_persisted_collection_count(client: Any) -> int:
-    return pool.live_persisted_collection_count(client)
-
-
-def _register_shared_session(key: str, *, client: Any, cluster: Any | None) -> None:
-    pool.register_shared_session(key, client=client, cluster=cluster)
-
-
-def _release_shared_session(key: str, *, logger: Any | None = None) -> None:
-    pool.release_shared_session(key, logger=logger)
-
-
 # ---------------------------------------------------------------------------
-# Public helpers (unchanged API)
+# Public helpers
 # ---------------------------------------------------------------------------
 
 def describe_client(client: Any) -> dict[str, Any]:
@@ -340,19 +326,9 @@ def _load_dotenv_values(env_file: str | Path | None) -> dict[str, str]:
     path = Path(env_file)
     if not path.exists():
         return {}
-
-    values: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, raw_value = stripped.split("=", 1)
-        key = key.strip()
-        value = raw_value.strip()
-        if value and len(value) >= 2 and value[0] == value[-1] and value[0] in {"\"", "'"}:
-            value = value[1:-1]
-        values[key] = value
-    return values
+    # Delegate to boti's validated loader (rejects NUL bytes, control
+    # characters, and malformed variable names) instead of hand-parsing.
+    return load_dotenv_values(path)
 
 
 # ---------------------------------------------------------------------------
@@ -451,8 +427,8 @@ class DaskSession(ManagedResource):
                 skip_logger=logger is None,
             )
         elif logger is not None:
-            config.logger = logger
-            config.skip_logger = False
+            # Copy instead of mutating: the caller may share the config object.
+            config = config.model_copy(update={"logger": logger, "skip_logger": False})
 
         super().__init__(config=config)
 
@@ -471,16 +447,15 @@ class DaskSession(ManagedResource):
         self._owns_cluster: bool = False
         self._shared_session_key: str | None = None
 
-    # -- context manager (overrides ManagedResource @final to return client) --
-    # The @final decorator on ManagedResource.__enter__ is a type-checker hint
-    # only — not enforced at runtime.  We override to preserve the existing
-    # ``with session as client`` pattern.
+    # -- context manager (returns the client instead of the session) ----------
+    # ManagedResource.__enter__ is intentionally overridable for session-style
+    # resources; __exit__ stays final so close() always runs.
 
-    def __enter__(self) -> Any:  # type: ignore[override]
+    def __enter__(self) -> Any:
         self._assert_open()
         return self.open()
 
-    async def __aenter__(self) -> Any:  # type: ignore[override]
+    async def __aenter__(self) -> Any:
         self._assert_open()
         return await asyncio.to_thread(self.open)
 
@@ -512,6 +487,7 @@ class DaskSession(ManagedResource):
     # -- open / cleanup --------------------------------------------------------
 
     def open(self) -> Any:
+        self._assert_open()
         if self.client is not None:
             self._verify_client_if_requested(self.client)
             if self.logger is not None:
@@ -521,6 +497,16 @@ class DaskSession(ManagedResource):
         if Client is None:
             raise RuntimeError("dask.distributed is required for DaskSession.")
 
+        if self.shared:
+            # Serialise acquire-or-create per key: without this lock two
+            # concurrent first opens both miss try_acquire and both create a
+            # cluster, and the second register overwrites the first pool
+            # entry — leaking a cluster and corrupting the ref count.
+            with pool.shared_creation_lock(self._shared_key()):
+                return self._open_connection()
+        return self._open_connection()
+
+    def _open_connection(self) -> Any:
         if self.shared:
             session_key = self._shared_key()
             acquired = pool.try_acquire_shared_session(session_key)
@@ -533,10 +519,7 @@ class DaskSession(ManagedResource):
                 try:
                     self._verify_client_if_requested(client)
                 except Exception:
-                    pool.release_shared_session(session_key, logger=self.logger)
-                    self.client = None
-                    self._cluster = None
-                    self._shared_session_key = None
+                    self.close()
                     raise
                 if self.logger is not None:
                     self.logger.info("Reusing shared Dask session %s key=%r", describe_client(client), session_key)

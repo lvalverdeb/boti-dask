@@ -3,7 +3,7 @@ from __future__ import annotations
 import boti_dask
 
 
-def test_boti_dask_exports_migration_symbols():
+def test_boti_dask_exports_public_symbols():
     expected = {
         "DaskSession",
         "DaskSessionSettings",
