@@ -328,43 +328,48 @@ def safe_gather(
     )
 
 
-def _to_int_safe(value: Any, default: int = 0) -> int:
-    """Convert *value* to int, returning *default* on failure.
+def _to_int_safe_int(value: Any, default: int) -> int:
+    return int(value)
 
-    Handles ``numpy`` scalar types gracefully when numpy is not installed.
-    """
-    if value is None:
+
+def _to_int_safe_float(value: Any, default: int) -> int:
+    if np is not None and np.isnan(value):
         return default
-    if isinstance(value, int):
-        return int(value)
-    if isinstance(value, float):
-        if np is not None and np.isnan(value):
-            return default
-        return int(value)
-    if isinstance(value, (tuple, list)):
-        if not value:
-            return default
-        if np is not None:
-            try:
-                array = np.asarray(value)
-                if array.size == 0:
-                    return default
-                return _to_int_safe(array.ravel()[0], default=default)
-            except Exception:
-                _module_log.debug("numpy fast path failed for tuple/list value in _to_int_safe", exc_info=True)
-        return _to_int_safe(value[0], default=default)
-    if isinstance(value, (pd.Series, pd.Index)):
-        if len(value) == 0:
-            return default
-        if np is not None:
-            try:
-                array = np.asarray(value)
-                if array.size == 0:
-                    return default
-                return _to_int_safe(array.ravel()[0], default=default)
-            except Exception:
-                _module_log.debug("numpy fast path failed for Series/Index value in _to_int_safe", exc_info=True)
-        return _to_int_safe(value.iloc[0], default=default)
+    return int(value)
+
+
+def _to_int_safe_first_element(
+    value: Any, default: int, *, fallback_first: Callable[[Any], Any], kind: str
+) -> int:
+    """Extract the first element of a sequence-like *value*.
+
+    Tries numpy's fast path first; falls back to ``fallback_first(value)``
+    when numpy is unavailable or the fast path fails.
+    """
+    if np is not None:
+        try:
+            array = np.asarray(value)
+            if array.size == 0:
+                return default
+            return _to_int_safe(array.ravel()[0], default=default)
+        except Exception:
+            _module_log.debug(f"numpy fast path failed for {kind} value in _to_int_safe", exc_info=True)
+    return _to_int_safe(fallback_first(value), default=default)
+
+
+def _to_int_safe_sequence(value: Any, default: int) -> int:
+    if not value:
+        return default
+    return _to_int_safe_first_element(value, default, fallback_first=lambda v: v[0], kind="tuple/list")
+
+
+def _to_int_safe_pandas(value: Any, default: int) -> int:
+    if len(value) == 0:
+        return default
+    return _to_int_safe_first_element(value, default, fallback_first=lambda v: v.iloc[0], kind="Series/Index")
+
+
+def _to_int_safe_fallback(value: Any, default: int) -> int:
     result = getattr(value, "item", None)
     if callable(result):
         try:
@@ -376,6 +381,28 @@ def _to_int_safe(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+# Ordered like the isinstance chain they replace: first matching type wins.
+_TO_INT_SAFE_HANDLERS: list[tuple[type | tuple[type, ...], Callable[[Any, int], int]]] = [
+    (int, _to_int_safe_int),
+    (float, _to_int_safe_float),
+    ((tuple, list), _to_int_safe_sequence),
+    ((pd.Series, pd.Index), _to_int_safe_pandas),
+]
+
+
+def _to_int_safe(value: Any, default: int = 0) -> int:
+    """Convert *value* to int, returning *default* on failure.
+
+    Handles ``numpy`` scalar types gracefully when numpy is not installed.
+    """
+    if value is None:
+        return default
+    for types, handler in _TO_INT_SAFE_HANDLERS:
+        if isinstance(value, types):
+            return handler(value, default)
+    return _to_int_safe_fallback(value, default)
 
 
 def dask_is_probably_empty(obj: Any) -> bool:
