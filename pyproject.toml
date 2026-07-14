@@ -21,16 +21,16 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "boti>=0.1.0",
-    "dask[dataframe,distributed]>=2026.3.0",
-    "pandas>=3.0.2",
+    "boti>=1.0.0,<2.0.0",
+    "dask[dataframe,distributed]>=2026.3.0,<2027.0.0",
+    "pandas>=3.0.2,<4.0.0",
 ]
 
 [project.optional-dependencies]
 extra = [
-    "numpy>=2.3.0",
-    "polars>=1.29.0",
-    "pyarrow>=23.0.1",
+    "numpy>=2.3.0,<3.0.0",
+    "polars>=1.29.0,<2.0.0",
+    "pyarrow>=23.0.1,<24.0.0",
 ]
 
 [project.urls]
