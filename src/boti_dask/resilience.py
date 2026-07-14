@@ -353,7 +353,9 @@ def _to_int_safe_first_element(
                 return default
             return _to_int_safe(array.ravel()[0], default=default)
         except Exception:
-            _module_log.debug(f"numpy fast path failed for {kind} value in _to_int_safe", exc_info=True)
+            _module_log.debug(
+                "numpy fast path failed for %s value in _to_int_safe", kind, exc_info=True
+            )
     return _to_int_safe(fallback_first(value), default=default)
 
 
