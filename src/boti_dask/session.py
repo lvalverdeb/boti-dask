@@ -1,19 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
-import re
-import threading
 import warnings
-import weakref
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-import dask
 
 try:
     from dask.distributed import Client, LocalCluster, get_client
@@ -24,230 +16,24 @@ except ImportError:
 
 from boti.core.managed_resource import ManagedResource
 from boti.core.models import ResourceConfig
-from boti.core.settings import load_dotenv_values
 
-from ._internal import _is_dask_dataframe_like, _is_running_client, _log
-
-_RECOMMENDED_DASK_CONFIG = {
-    "distributed.comm.timeouts.connect": "20s",
-    "distributed.comm.timeouts.tcp": "120s",
-    "distributed.worker.memory.target": 0.6,
-    "distributed.worker.memory.spill": 0.7,
-    "distributed.worker.memory.pause": 0.8,
-    "distributed.scheduler.allowed-failures": 3,
-    "distributed.deploy.lost-worker-timeout": "60s",
-    "distributed.admin.large-graph-warning-threshold": "50MB",
-    "dataframe.shuffle.method": "tasks",
-}
-
-_ENV_PREFIX_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*_?$")
-
-
-# ---------------------------------------------------------------------------
-# SessionPool — replaces module-level registries
-# ---------------------------------------------------------------------------
-
-class SessionPool:
-    """Manages Dask client, cluster, and persisted-collection registries.
-
-    A module-level singleton replaces the previous bare module-level dicts.
-    """
-
-    def __init__(self) -> None:
-        self._managed_clients: dict[int, weakref.ReferenceType[Any]] = {}
-        self._persisted_collections: dict[int, list[weakref.ReferenceType[Any]]] = {}
-        self._shared_sessions: dict[str, dict[str, Any]] = {}
-        self._shared_creation_locks: dict[str, threading.Lock] = {}
-        self._lock = threading.RLock()
-
-    # -- managed client helpers ------------------------------------------------
-
-    def register_managed_client(self, client: Any) -> None:
-        client_id = id(client)
-
-        def _prune(ref: weakref.ReferenceType[Any]) -> None:
-            # GC callback: drop registry entries for the collected client so
-            # long-lived processes churning many clients do not accumulate
-            # dead ids. The identity check guards against id() reuse by a
-            # newer client registered under the same address.
-            with self._lock:
-                if self._managed_clients.get(client_id) is ref:
-                    self._managed_clients.pop(client_id, None)
-                    self._persisted_collections.pop(client_id, None)
-
-        with self._lock:
-            self._managed_clients[client_id] = weakref.ref(client, _prune)
-
-    def unregister_managed_client(self, client: Any) -> None:
-        client_id = id(client)
-        with self._lock:
-            self._managed_clients.pop(client_id, None)
-            self._persisted_collections.pop(client_id, None)
-
-    def is_client_registered(self, client: Any) -> bool:
-        with self._lock:
-            return id(client) in self._managed_clients
-
-    # -- persisted collection tracking -----------------------------------------
-
-    def track_persisted_collection(self, obj: Any, client: Any | None) -> None:
-        if client is None or not _is_dask_dataframe_like(obj):
-            return
-        client_id = id(client)
-        with self._lock:
-            if client_id not in self._managed_clients:
-                return
-        try:
-            setattr(obj, "_boti_managed_persisted", True)
-        except Exception:
-            _module_log.debug("Failed to mark persisted collection", exc_info=True)
-        try:
-            ref = weakref.ref(obj)
-        except TypeError:
-            return
-        with self._lock:
-            self._persisted_collections.setdefault(client_id, []).append(ref)
-
-    def live_persisted_collection_count(self, client: Any) -> int:
-        client_id = id(client)
-        with self._lock:
-            refs = self._persisted_collections.get(client_id, [])
-            live = [ref for ref in refs if ref() is not None]
-            if live:
-                self._persisted_collections[client_id] = live
-            else:
-                self._persisted_collections.pop(client_id, None)
-        return len(live)
-
-    # -- shared session helpers ------------------------------------------------
-
-    def shared_creation_lock(self, key: str) -> threading.Lock:
-        """Per-key lock held by DaskSession.open() across acquire-or-create.
-
-        Without it, two concurrent first opens of the same key both miss
-        ``try_acquire_shared_session`` and both create a cluster; the second
-        ``register_shared_session`` then overwrites the first entry, leaking
-        the first cluster and corrupting the ref count.
-        """
-        with self._lock:
-            lock = self._shared_creation_locks.get(key)
-            if lock is None:
-                lock = threading.Lock()
-                self._shared_creation_locks[key] = lock
-            return lock
-
-    def register_shared_session(self, key: str, *, client: Any, cluster: Any | None) -> None:
-        self.register_managed_client(client)
-        with self._lock:
-            self._shared_sessions[key] = {
-                "client": client,
-                "cluster": cluster,
-                "ref_count": 1,
-            }
-
-    def get_shared_session(self, key: str) -> dict[str, Any] | None:
-        with self._lock:
-            entry = self._shared_sessions.get(key)
-            return dict(entry) if entry is not None else None
-
-    def try_acquire_shared_session(self, key: str) -> dict[str, Any] | None:
-        """Atomically check for a shared session and increment ref_count.
-
-        Returns a dict with ``client`` / ``cluster`` keys if acquired,
-        or ``None`` if the session does not exist or the client is gone.
-        """
-        with self._lock:
-            entry = self._shared_sessions.get(key)
-            if entry is None:
-                return None
-            client = entry.get("client")
-            if not _is_running_client(client):
-                self._shared_sessions.pop(key, None)
-                return None
-            entry["ref_count"] = int(entry.get("ref_count", 0)) + 1
-            return {"client": client, "cluster": entry.get("cluster")}
-
-    def release_shared_session(self, key: str, *, logger: Any | None = None) -> None:
-        client: Any | None = None
-        cluster: Any | None = None
-        with self._lock:
-            entry = self._shared_sessions.get(key)
-            if entry is None:
-                return
-            entry["ref_count"] = int(entry.get("ref_count", 0)) - 1
-            if entry["ref_count"] > 0:
-                _log(logger, "debug", f"Released shared Dask session key={key!r}; ref_count={entry['ref_count']}")
-                return
-            client = entry.get("client")
-            cluster = entry.get("cluster")
-            self._shared_sessions.pop(key, None)
-
-        if client is not None:
-            live = self.live_persisted_collection_count(client)
-            if live:
-                msg = (
-                    "Closing shared Dask session with "
-                    f"{live} live persisted collection(s). "
-                    "Those collections will become unusable after the session closes; "
-                    "compute or preview inside the shared session, or keep another shared holder open."
-                )
-                warnings.warn(msg, RuntimeWarning, stacklevel=3)
-                _log(logger, "warning", msg)
-            try:
-                client.close()
-            finally:
-                self.unregister_managed_client(client)
-        if cluster is not None:
-            cluster.close()
-
-    # -- testing helpers -------------------------------------------------------
-
-    def debug_set_shared_ref_count(self, key: str, count: int) -> None:
-        with self._lock:
-            if key in self._shared_sessions:
-                self._shared_sessions[key]["ref_count"] = count
-
-    def debug_shared_session_keys(self) -> list[str]:
-        with self._lock:
-            return list(self._shared_sessions)
-
-
-pool = SessionPool()
-
-
-# ---------------------------------------------------------------------------
-# Module-level helpers (shared state handled via pool)
-# ---------------------------------------------------------------------------
+from .session_helpers import (
+    _prepare_cluster_kwargs,
+    _stable_mapping_repr,
+    _verify_client_connection,
+    apply_recommended_dask_config,
+    recommended_dask_config,
+)
+from .session_pool import SessionPool, pool
+from .session_settings import DaskSessionSettings
 
 # Module-level fallback for free functions with no caller-supplied logger.
-# Debug level only — these are expected/best-effort paths.
+# Debug level only — these are expected/best-effort paths. Kept here (rather
+# than in session_helpers.py) because describe_client/current_client_summary
+# are covered by tests that scope caplog to the "boti_dask.session" logger
+# name specifically, and get_client is monkeypatched via this module.
 _module_log = logging.getLogger(__name__)
 
-
-def _stable_mapping_repr(value: Mapping[str, Any]) -> str:
-    return repr(sorted((str(key), repr(item)) for key, item in value.items()))
-
-
-def _verify_client_connection(client: Any) -> None:
-    try:
-        client.scheduler_info()
-    except Exception as exc:
-        raise RuntimeError(
-            "Failed to verify Dask client connectivity. "
-            "Check the scheduler address and cluster health before retrying."
-        ) from exc
-
-
-def _prepare_cluster_kwargs(cluster_factory: Any, cluster_kwargs: Mapping[str, Any]) -> dict[str, Any]:
-    resolved = dict(cluster_kwargs)
-    if cluster_factory is LocalCluster and "dashboard_address" not in resolved:
-        resolved["dashboard_address"] = ":0"
-    return resolved
-
-
-# ---------------------------------------------------------------------------
-# Public helpers
-# ---------------------------------------------------------------------------
 
 def describe_client(client: Any) -> dict[str, Any]:
     try:
@@ -273,128 +59,16 @@ def current_client_summary() -> dict[str, Any] | None:
     try:
         return describe_client(get_client())
     except Exception:
-        _module_log.debug("describe_client(get_client()) failed in current_client_summary", exc_info=True)
+        _module_log.debug(
+            "describe_client(get_client()) failed in current_client_summary", exc_info=True
+        )
         return None
-
-
-def recommended_dask_config(*, overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    config = dict(_RECOMMENDED_DASK_CONFIG)
-    if overrides:
-        config.update(dict(overrides))
-    return config
-
-
-def apply_recommended_dask_config(**overrides: Any) -> Any:
-    return dask.config.set(recommended_dask_config(overrides=overrides))
-
-
-def _validate_env_prefix(prefix: str) -> str:
-    normalized = prefix.strip()
-    if not normalized or not _ENV_PREFIX_PATTERN.fullmatch(normalized):
-        raise ValueError(
-            "Environment prefixes must match [A-Za-z_][A-Za-z0-9_]* and may end with a single underscore."
-        )
-    return normalized
-
-
-def _parse_env_bool(raw: str, *, field_name: str) -> bool:
-    normalized = raw.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise ValueError(
-        f"Invalid boolean value for {field_name!r}: {raw!r}. Use one of true/false, yes/no, 1/0."
-    )
-
-
-def _parse_env_json_mapping(raw: str, *, field_name: str) -> dict[str, Any]:
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"Invalid JSON value for {field_name!r}: {raw!r}. Provide a JSON object."
-        ) from exc
-    if not isinstance(parsed, dict):
-        raise ValueError(f"Invalid value for {field_name!r}: expected a JSON object.")
-    return dict(parsed)
-
-
-def _load_dotenv_values(env_file: str | Path | None) -> dict[str, str]:
-    if env_file is None:
-        return {}
-    path = Path(env_file)
-    if not path.exists():
-        return {}
-    # Delegate to boti's validated loader (rejects NUL bytes, control
-    # characters, and malformed variable names) instead of hand-parsing.
-    return load_dotenv_values(path)
-
-
-# ---------------------------------------------------------------------------
-# DaskSessionSettings (unchanged)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(slots=True)
-class DaskSessionSettings:
-    scheduler_address: str | None = None
-    shared: bool = False
-    shared_key: str | None = None
-    verify_connectivity: bool = False
-    cluster_kwargs: dict[str, Any] = field(default_factory=dict)
-    client_kwargs: dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def from_env_prefix(
-        cls,
-        prefix: str,
-        *,
-        env_file: str | Path | None = None,
-    ) -> DaskSessionSettings:
-        normalized_prefix = _validate_env_prefix(prefix)
-        merged = _load_dotenv_values(env_file)
-        merged.update({k: v for k, v in os.environ.items() if isinstance(v, str)})
-
-        scheduler_address = merged.get(f"{normalized_prefix}SCHEDULER_ADDRESS")
-        shared_raw = merged.get(f"{normalized_prefix}SHARED")
-        shared_key = merged.get(f"{normalized_prefix}SHARED_KEY")
-        verify_raw = merged.get(f"{normalized_prefix}VERIFY_CONNECTIVITY")
-        cluster_kwargs_raw = merged.get(f"{normalized_prefix}CLUSTER_KWARGS")
-        client_kwargs_raw = merged.get(f"{normalized_prefix}CLIENT_KWARGS")
-
-        return cls(
-            scheduler_address=scheduler_address or None,
-            shared=False if shared_raw is None else _parse_env_bool(shared_raw, field_name="shared"),
-            shared_key=shared_key or None,
-            verify_connectivity=False
-            if verify_raw is None
-            else _parse_env_bool(verify_raw, field_name="verify_connectivity"),
-            cluster_kwargs={}
-            if cluster_kwargs_raw is None
-            else _parse_env_json_mapping(cluster_kwargs_raw, field_name="cluster_kwargs"),
-            client_kwargs={}
-            if client_kwargs_raw is None
-            else _parse_env_json_mapping(client_kwargs_raw, field_name="client_kwargs"),
-        )
-
-    def to_session_kwargs(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "shared": self.shared,
-            "verify_connectivity": self.verify_connectivity,
-            "cluster_kwargs": dict(self.cluster_kwargs),
-            "client_kwargs": dict(self.client_kwargs),
-        }
-        if self.scheduler_address:
-            payload["scheduler_address"] = self.scheduler_address
-        if self.shared_key:
-            payload["shared_key"] = self.shared_key
-        return payload
 
 
 # ---------------------------------------------------------------------------
 # DaskSession — ManagedResource subclass
 # ---------------------------------------------------------------------------
+
 
 class DaskSession(ManagedResource):
     """A Dask distributed session backed by a :class:`ManagedResource` lifecycle.
@@ -508,45 +182,64 @@ class DaskSession(ManagedResource):
 
     def _open_connection(self) -> Any:
         if self.shared:
-            session_key = self._shared_key()
-            acquired = pool.try_acquire_shared_session(session_key)
-            if acquired is not None:
-                client = acquired["client"]
-                cluster = acquired["cluster"]
-                self.client = client
-                self._cluster = cluster
-                self._shared_session_key = session_key
-                try:
-                    self._verify_client_if_requested(client)
-                except Exception:
-                    self.close()
-                    raise
-                if self.logger is not None:
-                    self.logger.info("Reusing shared Dask session %s key=%r", describe_client(client), session_key)
-                return client
+            reused = self._reuse_shared_session()
+            if reused is not None:
+                return reused
 
         if self.scheduler_address is not None:
-            client = Client(self.scheduler_address, **dict(self.client_kwargs))
-            if self.shared:
-                pool.register_shared_session(self._shared_key(), client=client, cluster=None)
-                self.client = client
-                self._shared_session_key = self._shared_key()
-            else:
-                self.client = client
-                self._owns_client = True
-                pool.register_managed_client(client)
-            try:
-                self._verify_client_if_requested(client)
-            except Exception:
-                self.close()
-                raise
-            if self.logger is not None:
-                if self.shared:
-                    self.logger.info("Connected shared Dask client to %s", describe_client(client))
-                else:
-                    self.logger.info("Connected Dask client to %s", describe_client(client))
-            return client
+            return self._connect_to_scheduler()
 
+        return self._create_local_cluster_session()
+
+    def _verify_or_abort(self, client: Any) -> None:
+        """Run connectivity verification if requested; on failure, close() and re-raise."""
+        try:
+            self._verify_client_if_requested(client)
+        except Exception:
+            self.close()
+            raise
+
+    def _reuse_shared_session(self) -> Any | None:
+        """Reuse the existing shared session for this key, if one is live; else None."""
+        session_key = self._shared_key()
+        acquired = pool.try_acquire_shared_session(session_key)
+        if acquired is None:
+            return None
+        client = acquired["client"]
+        self.client = client
+        self._cluster = acquired["cluster"]
+        self._shared_session_key = session_key
+        self._verify_or_abort(client)
+        if self.logger is not None:
+            self.logger.info(
+                "Reusing shared Dask session %s key=%r", describe_client(client), session_key
+            )
+        return client
+
+    def _connect_to_scheduler(self) -> Any:
+        """Connect directly to an existing scheduler address."""
+        client = Client(self.scheduler_address, **dict(self.client_kwargs))
+        if self.shared:
+            pool.register_shared_session(self._shared_key(), client=client, cluster=None)
+            self.client = client
+            self._shared_session_key = self._shared_key()
+        else:
+            self.client = client
+            self._owns_client = True
+            pool.register_managed_client(client)
+
+        self._verify_or_abort(client)
+        if self.logger is not None:
+            verb = (
+                "Connected shared Dask client to %s"
+                if self.shared
+                else "Connected Dask client to %s"
+            )
+            self.logger.info(verb, describe_client(client))
+        return client
+
+    def _create_local_cluster_session(self) -> Any:
+        """Create a new cluster (via cluster_factory, defaulting to LocalCluster) and connect to it."""
         cluster_factory = self.cluster_factory or LocalCluster
         if cluster_factory is None:
             raise RuntimeError("LocalCluster is unavailable. Install dask[distributed].")
@@ -571,17 +264,14 @@ class DaskSession(ManagedResource):
             self._owns_client = True
             pool.register_managed_client(client)
 
-        try:
-            self._verify_client_if_requested(client)
-        except Exception:
-            self.close()
-            raise
-
+        self._verify_or_abort(client)
         if self.logger is not None:
-            if self.shared:
-                self.logger.info("Started shared Dask session %s", describe_client(client))
-            else:
-                self.logger.info("Started managed Dask session %s", describe_client(client))
+            verb = (
+                "Started shared Dask session %s"
+                if self.shared
+                else "Started managed Dask session %s"
+            )
+            self.logger.info(verb, describe_client(client))
         return client
 
     def _cleanup(self) -> None:
@@ -644,6 +334,10 @@ class DaskSession(ManagedResource):
         return cls(**payload)
 
 
+# Functional-style factory aliases for DaskSession/DaskSession.from_env_prefix
+# — the "underlying object" the rule suggests exposing is DaskSession itself,
+# already public and re-exported in __all__ right alongside these.
+# spaghetti-ignore[pass-through-method]
 def dask_session_from_env_prefix(
     prefix: str,
     *,
@@ -653,6 +347,7 @@ def dask_session_from_env_prefix(
     return DaskSession.from_env_prefix(prefix, env_file=env_file, **overrides)
 
 
+# spaghetti-ignore[pass-through-method]
 def dask_session(**kwargs: Any) -> DaskSession:
     return DaskSession(**kwargs)
 

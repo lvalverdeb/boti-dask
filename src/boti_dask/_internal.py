@@ -14,6 +14,9 @@ def _log(logger: Any | None, level: str, message: str) -> None:
 
 
 def _is_dask_dataframe_like(obj: Any) -> bool:
+    # `_meta` is dask's own duck-typing convention for "quacks like a Dask
+    # collection" (e.g. dask-cudf), not a boti class's private attribute.
+    # spaghetti-ignore[encapsulation-violation]
     return isinstance(obj, (dd.DataFrame, dd.Series)) or hasattr(obj, "_meta")
 
 

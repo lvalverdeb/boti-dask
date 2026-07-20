@@ -9,10 +9,11 @@ import pandas as pd
 import pytest
 
 from boti_dask import resilience as resilience_module
-from boti_dask.resilience import (
-    dask_is_empty,
-    dask_is_probably_empty,
-    inspect_graph,
+from boti_dask import resilience_ops as resilience_ops_module
+from boti_dask.diagnostics import inspect_graph
+from boti_dask.resilience import dask_is_probably_empty
+from boti_dask.resilience_async import dask_is_empty
+from boti_dask.resilience_ops import (
     safe_compute,
     safe_gather,
     safe_head,
@@ -106,7 +107,7 @@ def test_resolve_active_client_logs_debug_when_get_client_fails(monkeypatch, cap
     monkeypatch.setattr(resilience_module, "get_client", failing_get_client)
 
     with caplog.at_level(logging.DEBUG, logger="boti_dask.resilience"):
-        result = resilience_module._resolve_active_client()
+        result = resilience_ops_module._resolve_active_client()
 
     assert result is None
     assert any(

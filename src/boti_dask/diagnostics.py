@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Any
 
 import dask.dataframe as dd
@@ -49,36 +50,56 @@ def inspect_graph(obj: Any, *, logger: Any | None = None) -> dict[str, Any]:
     return metrics
 
 
+def _describe_dask_frame(frame: Any) -> dict[str, Any]:
+    graph = frame.__dask_graph__()
+    return {
+        "engine": "dask",
+        "columns": len(frame.columns),
+        "npartitions": frame.npartitions,
+        "graph_tasks": len(graph) if hasattr(graph, "__len__") else None,
+        "graph_layers": len(frame.dask.layers) if hasattr(frame.dask, "layers") else None,
+        "known_divisions": frame.known_divisions,
+    }
+
+
+def _describe_pandas_frame(frame: Any) -> dict[str, Any]:
+    return {
+        "engine": "pandas",
+        "rows": len(frame.index),
+        "columns": len(frame.columns),
+    }
+
+
+def _describe_arrow_table(frame: Any) -> dict[str, Any]:
+    return {
+        "engine": "arrow",
+        "rows": frame.num_rows,
+        "columns": len(frame.column_names),
+    }
+
+
+def _describe_polars_frame(frame: Any) -> dict[str, Any]:
+    return {
+        "engine": "polars",
+        "rows": frame.height,
+        "columns": frame.width,
+    }
+
+
+# Ordered like the isinstance chain they replace: first matching predicate wins.
+_FRAME_ENGINE_HANDLERS: list[tuple[Callable[[Any], bool], Callable[[Any], dict[str, Any]]]] = [
+    (lambda frame: isinstance(frame, dd.DataFrame), _describe_dask_frame),
+    (lambda frame: isinstance(frame, pd.DataFrame), _describe_pandas_frame),
+    (lambda frame: pa is not None and isinstance(frame, pa.Table), _describe_arrow_table),
+    (lambda frame: pl is not None and isinstance(frame, pl.DataFrame), _describe_polars_frame),
+]
+
+
 def describe_frame(frame: Any) -> dict[str, Any]:
     """Return compact frame metrics suitable for runtime diagnostics logs."""
-    if isinstance(frame, dd.DataFrame):
-        graph = frame.__dask_graph__()
-        return {
-            "engine": "dask",
-            "columns": len(frame.columns),
-            "npartitions": frame.npartitions,
-            "graph_tasks": len(graph) if hasattr(graph, "__len__") else None,
-            "graph_layers": len(frame.dask.layers) if hasattr(frame.dask, "layers") else None,
-            "known_divisions": frame.known_divisions,
-        }
-    if isinstance(frame, pd.DataFrame):
-        return {
-            "engine": "pandas",
-            "rows": len(frame.index),
-            "columns": len(frame.columns),
-        }
-    if pa is not None and isinstance(frame, pa.Table):
-        return {
-            "engine": "arrow",
-            "rows": frame.num_rows,
-            "columns": len(frame.column_names),
-        }
-    if pl is not None and isinstance(frame, pl.DataFrame):
-        return {
-            "engine": "polars",
-            "rows": frame.height,
-            "columns": frame.width,
-        }
+    for predicate, handler in _FRAME_ENGINE_HANDLERS:
+        if predicate(frame):
+            return handler(frame)
     return {"engine": type(frame).__name__}
 
 
@@ -97,7 +118,7 @@ class UniqueValuesExtractor:
         self.logger = logger
 
     def _extract_one(self, frame: dd.DataFrame, column: str, limit: int) -> tuple[str, list[Any]]:
-        from .resilience import safe_compute
+        from .resilience_ops import safe_compute
 
         if column not in frame.columns:
             _log(self.logger, "warning", f"Column '{column}' not found for unique extraction.")
@@ -125,13 +146,17 @@ class UniqueValuesExtractor:
         *columns: str,
         limit: int = 100_000,
     ) -> dict[str, list[Any]]:
-        from .resilience import safe_persist
+        from .resilience_ops import safe_persist
 
         if self.dask_client is not None:
             frame = safe_persist(frame, dask_client=self.dask_client, logger=self.logger)
         else:
             frame = frame.persist()
-        _log(self.logger, "info", f"Persisted {frame.npartitions}-partition frame for unique extraction.")
+        _log(
+            self.logger,
+            "info",
+            f"Persisted {frame.npartitions}-partition frame for unique extraction.",
+        )
         pairs = await asyncio.gather(
             *(asyncio.to_thread(self._extract_one, frame, column, limit) for column in columns)
         )

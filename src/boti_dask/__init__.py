@@ -8,13 +8,17 @@ from boti_dask.diagnostics import (
 )
 from boti_dask.resilience import (
     RECOVERABLE_DASK_ERRORS,
+    dask_is_probably_empty,
+)
+from boti_dask.resilience_async import (
     async_safe_compute,
     async_safe_gather,
     async_safe_head,
     async_safe_persist,
     async_safe_wait,
     dask_is_empty,
-    dask_is_probably_empty,
+)
+from boti_dask.resilience_ops import (
     safe_compute,
     safe_gather,
     safe_head,
@@ -59,4 +63,3 @@ __all__ = [
     "safe_persist",
     "safe_wait",
 ]
-
