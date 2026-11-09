@@ -18,6 +18,7 @@ def test_boti_dask_exports_public_symbols():
         "TelemetryProvider",
         "configure_telemetry",
         "get_telemetry",
+        "sync_uploads",
         "UniqueValuesExtractor",
         "apply_recommended_dask_config",
         "async_safe_compute",

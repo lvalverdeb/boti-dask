@@ -35,6 +35,25 @@ def _stable_mapping_repr(value: Mapping[str, Any]) -> str:
     return repr(sorted((str(key), repr(item)) for key, item in value.items()))
 
 
+def _derived_shared_key(
+    scheduler_address: str | None,
+    factory: Any,
+    cluster_kwargs: Mapping[str, Any],
+    client_kwargs: Mapping[str, Any],
+) -> str:
+    """The pool key for a session without an explicit ``shared_key``."""
+    if scheduler_address is not None:
+        return f"scheduler:{scheduler_address}|client={_stable_mapping_repr(client_kwargs)}"
+    module = getattr(factory, "__module__", type(factory).__module__)
+    qualname = getattr(
+        factory, "__qualname__", getattr(factory, "__name__", type(factory).__name__)
+    )
+    return (
+        f"cluster:{module}.{qualname}|cluster={_stable_mapping_repr(cluster_kwargs)}|"
+        f"client={_stable_mapping_repr(client_kwargs)}"
+    )
+
+
 class DaskSessionUnavailable(RuntimeError):
     """The scheduler could not be reached, had too few workers, or did not run a task
     within the connectivity deadline."""

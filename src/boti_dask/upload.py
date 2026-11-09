@@ -1,0 +1,162 @@
+"""Ship code to the workers once: files, directories, pure-Python wheels and requirements.
+
+:func:`sync_uploads` sends each payload through ``Client.upload_file`` (files,
+directories zipped deterministically, wheels renamed so workers put them on
+``sys.path``) or a ``PipInstall`` plugin (requirement strings), and records the
+SHA-256 of every payload in the scheduler dataset ``boti-dask:uploads`` so a
+later session against the same scheduler skips what is already there.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import shutil
+import tempfile
+import zipfile
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
+
+from ._internal import _log
+
+__all__ = ["UPLOAD_DATASET", "Payload", "PayloadKind", "classify_payload", "sync_uploads"]
+
+UPLOAD_DATASET = "boti-dask:uploads"
+_module_log = logging.getLogger(__name__)
+
+_LOADABLE_SUFFIXES = frozenset({".py", ".zip", ".egg", ".pyz"})
+_SKIPPED_PARTS = frozenset({"__pycache__", ".git", ".pytest_cache", ".mypy_cache"})
+_EPOCH = (1980, 1, 1, 0, 0, 0)  # zip's earliest timestamp, fixed for reproducible bytes
+_PLUGIN_NAME_DIGEST_CHARS = 16
+
+
+class PayloadKind(StrEnum):
+    FILE = "file"
+    DIRECTORY = "directory"
+    WHEEL = "wheel"
+    REQUIREMENT = "requirement"
+
+
+@dataclass(frozen=True, slots=True)
+class Payload:
+    """One thing to ship and the digest that identifies it on the scheduler."""
+
+    kind: PayloadKind
+    source: str
+    digest: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.kind.value}:{self.source}"
+
+
+def _file_digest(path: Path) -> str:
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def _directory_files(root: Path) -> Iterator[Path]:
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and not (_SKIPPED_PARTS & set(path.relative_to(root).parts)):
+            if path.suffix != ".pyc":
+                yield path
+
+
+def _zip_directory(root: Path, target: Path) -> None:
+    """Zip *root* as ``root.name/...`` with sorted entries and fixed timestamps."""
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in _directory_files(root):
+            info = zipfile.ZipInfo(f"{root.name}/{path.relative_to(root).as_posix()}", _EPOCH)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, path.read_bytes())
+
+
+def classify_payload(item: str | Path) -> Payload:
+    """Decide how *item* ships and compute its digest; the digest never touches the cluster."""
+    path = Path(item).expanduser()
+    if path.is_dir():
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / f"{path.name}.zip"
+            _zip_directory(path, target)
+            return Payload(PayloadKind.DIRECTORY, str(path), _file_digest(target))
+    if path.is_file():
+        kind = PayloadKind.WHEEL if path.suffix == ".whl" else PayloadKind.FILE
+        if kind is PayloadKind.FILE and path.suffix not in _LOADABLE_SUFFIXES:
+            raise ValueError(
+                f"Cannot upload {path}: workers load .py, .zip, .egg, .pyz and pure-Python "
+                ".whl files; pass a requirement string for anything that needs pip."
+            )
+        return Payload(kind, str(path), _file_digest(path))
+    text = str(item).strip()
+    if not text:
+        raise ValueError("Upload payloads must be a path or a non-empty requirement string.")
+    return Payload(PayloadKind.REQUIREMENT, text, hashlib.sha256(text.encode()).hexdigest())
+
+
+def _send_file_payload(client: Any, payload: Payload) -> None:
+    path = Path(payload.source)
+    if payload.kind is PayloadKind.FILE:
+        client.upload_file(str(path))
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        # Workers add .zip files to sys.path but ignore .whl, so a pure-Python
+        # wheel (a zip of package directories) is shipped under a .zip name.
+        target = Path(tmp) / f"{path.name}.zip"
+        if payload.kind is PayloadKind.WHEEL:
+            shutil.copyfile(path, target)
+        else:
+            _zip_directory(path, target)
+        client.upload_file(str(target))
+
+
+def _send_requirements(client: Any, payloads: list[Payload]) -> None:
+    if not payloads:
+        return
+    from distributed.diagnostics.plugin import PipInstall
+
+    packages = [payload.source for payload in payloads]
+    client.register_plugin(
+        PipInstall(packages=packages), name=f"boti-dask-pip-{_digest_of(packages)}"
+    )
+
+
+def _digest_of(parts: Iterable[str]) -> str:
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:_PLUGIN_NAME_DIGEST_CHARS]
+
+
+def _known_uploads(client: Any) -> dict[str, str]:
+    try:
+        known = client.get_dataset(UPLOAD_DATASET, default=None)
+    except Exception:
+        _module_log.debug("get_dataset(%s) failed", UPLOAD_DATASET, exc_info=True)
+        return {}
+    return dict(known) if isinstance(known, dict) else {}
+
+
+def sync_uploads(
+    client: Any, items: Iterable[str | Path], *, logger: Any | None = None
+) -> list[Payload]:
+    """Send every payload in *items* the scheduler has not seen; return those sent."""
+    payloads = [classify_payload(item) for item in items]
+    known = _known_uploads(client)
+    pending = [payload for payload in payloads if payload.digest not in known]
+    if not pending:
+        _log(logger, "debug", f"All {len(payloads)} upload payload(s) already on the cluster.")
+        return []
+    requirements = [payload for payload in pending if payload.kind is PayloadKind.REQUIREMENT]
+    for payload in pending:
+        if payload.kind is not PayloadKind.REQUIREMENT:
+            _send_file_payload(client, payload)
+    _send_requirements(client, requirements)
+    known.update({payload.digest: payload.label for payload in pending})
+    client.publish_dataset(known, name=UPLOAD_DATASET, override=True)
+    _log(
+        logger,
+        "info",
+        f"Uploaded {len(pending)} payload(s) to the cluster: "
+        + ", ".join(payload.label for payload in pending),
+    )
+    return pending

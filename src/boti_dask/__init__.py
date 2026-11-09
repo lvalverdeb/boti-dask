@@ -27,6 +27,8 @@ _LAZY = {
     "TelemetryProvider": ("boti_dask.telemetry", "TelemetryProvider"),
     "configure_telemetry": ("boti_dask.telemetry", "configure_telemetry"),
     "get_telemetry": ("boti_dask.telemetry", "get_telemetry"),
+    # Code shipping: files, directories, wheels and requirements sent once per scheduler.
+    "sync_uploads": ("boti_dask.upload", "sync_uploads"),
     # Cluster-wide primitives with process-local fallbacks (Dask only if a client exists).
     "cluster_lock": ("boti_dask.primitives", "cluster_lock"),
     "cluster_queue": ("boti_dask.primitives", "cluster_queue"),

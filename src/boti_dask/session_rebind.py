@@ -54,6 +54,7 @@ class SessionRebindMixin:
     logger: Any | None
     shared_key: str | None
     telemetry: Any | None
+    upload: list[Any]
     watchdog_config: WatchdogConfig | None
     _watchdog: Watchdog | None
     _cluster: Any | None
@@ -69,6 +70,14 @@ class SessionRebindMixin:
             return
         self._watchdog = Watchdog(self, self.watchdog_config, logger=self.logger)
         self._watchdog.start()
+
+    # -- uploads ---------------------------------------------------------------
+
+    def _sync_uploads(self) -> None:
+        if self.upload and self.client is not None:
+            from .upload import sync_uploads
+
+            sync_uploads(self.client, self.upload, logger=self.logger)
 
     # -- telemetry -------------------------------------------------------------
 
@@ -125,6 +134,7 @@ class SessionRebindMixin:
         pool.record_rebind()
         get_telemetry().add("rebinds", shared_key=self.shared_key)
         self.record_gauges()
+        self._sync_uploads()
         if self.logger is not None:
             self.logger.warning(
                 "Rebound Dask session key=%r to %s",

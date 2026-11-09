@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +20,10 @@ from boti.core.models import ResourceConfig
 from .session_helpers import (
     ConnectivityCheck,
     DaskSessionUnavailable,
+    _derived_shared_key,
     _open_client,
     _prepare_cluster_kwargs,
     _resolve_connectivity,
-    _stable_mapping_repr,
     _verify_client_connection,
     apply_recommended_dask_config,
     recommended_dask_config,
@@ -78,23 +78,15 @@ class DaskSession(SessionRebindMixin, ManagedResource):
     """A Dask distributed session backed by a :class:`ManagedResource` lifecycle.
 
     Accepts an existing client, connects to a scheduler address, or creates a
-    local cluster.  Supports shared (multi-holder) and managed (single-holder)
-    session patterns.
+    cluster. Supports shared (multi-holder) and managed (single-holder) sessions.
 
-    ``verify_connectivity`` is on by default: before a client is handed out the
-    scheduler is pinged, at least one worker is awaited and a trivial task is
-    run, all within :class:`ConnectivityCheck.timeout` (10 s). Pass ``False`` to
-    skip, or a :class:`ConnectivityCheck` to change the deadline or worker count.
-    A failed check raises :class:`DaskSessionUnavailable` instead of hanging.
-
-    ``telemetry`` (a :class:`~boti_dask.telemetry.TelemetryProvider`) becomes the
-    process provider on open, so the ``safe_*`` wrappers and the watchdog report
-    through it; see :mod:`boti_dask.telemetry`.
-
-    ``watchdog`` (a :class:`WatchdogConfig`) keeps probing the client on a
-    daemon thread after open and calls :meth:`rebind` once the configured number
-    of consecutive probes fail. It applies to clients the session creates, not
-    to an externally supplied ``client``.
+    ``verify_connectivity`` (default on) pings the scheduler, waits for a worker
+    and runs one task within :class:`ConnectivityCheck.timeout`; failure raises
+    :class:`DaskSessionUnavailable`. ``telemetry`` becomes the process provider
+    on open (:mod:`boti_dask.telemetry`). ``upload`` ships code to the workers
+    on open and after a rebind (:mod:`boti_dask.upload`). ``watchdog`` keeps
+    probing after open and calls :meth:`rebind` after repeated failures
+    (:mod:`boti_dask.watchdog`); it applies to clients the session creates.
     """
 
     def __init__(
@@ -110,22 +102,12 @@ class DaskSession(SessionRebindMixin, ManagedResource):
         verify_connectivity: bool | ConnectivityCheck = True,
         watchdog: WatchdogConfig | None = None,
         telemetry: Any | None = None,
+        upload: Sequence[str | Path] | None = None,
         config: ResourceConfig | None = None,
         verbose: bool = False,
         debug: bool = False,
     ) -> None:
-        if config is None:
-            config = ResourceConfig(
-                logger=logger,
-                verbose=verbose,
-                debug=debug,
-                skip_logger=logger is None,
-            )
-        elif logger is not None:
-            # Copy instead of mutating: the caller may share the config object.
-            config = config.model_copy(update={"logger": logger, "skip_logger": False})
-
-        super().__init__(config=config)
+        super().__init__(config=_resource_config(config, logger, verbose=verbose, debug=debug))
 
         self.client = client
         self.scheduler_address = scheduler_address
@@ -137,6 +119,7 @@ class DaskSession(SessionRebindMixin, ManagedResource):
         self.connectivity: ConnectivityCheck | None = _resolve_connectivity(verify_connectivity)
         self.watchdog_config = watchdog
         self.telemetry = telemetry
+        self.upload = list(upload or [])
 
         # Runtime state
         self._watchdog = None
@@ -161,17 +144,11 @@ class DaskSession(SessionRebindMixin, ManagedResource):
     def _shared_key(self) -> str:
         if self.shared_key is not None:
             return self.shared_key
-        scheduler = self.scheduler_address
-        if scheduler is not None:
-            return f"scheduler:{scheduler}|client={_stable_mapping_repr(self.client_kwargs)}"
-        factory = self.cluster_factory or LocalCluster
-        factory_name = (
-            f"{getattr(factory, '__module__', type(factory).__module__)}."
-            f"{getattr(factory, '__qualname__', getattr(factory, '__name__', type(factory).__name__))}"
-        )
-        return (
-            f"cluster:{factory_name}|cluster={_stable_mapping_repr(self.cluster_kwargs)}|"
-            f"client={_stable_mapping_repr(self.client_kwargs)}"
+        return _derived_shared_key(
+            self.scheduler_address,
+            self.cluster_factory or LocalCluster,
+            self.cluster_kwargs,
+            self.client_kwargs,
         )
 
     def _verify_client_if_requested(self, client: Any) -> None:
@@ -204,6 +181,7 @@ class DaskSession(SessionRebindMixin, ManagedResource):
         else:
             client = self._open_connection()
         self._install_telemetry()
+        self._sync_uploads()
         self._start_watchdog()
         return client
 
@@ -363,6 +341,19 @@ class DaskSession(SessionRebindMixin, ManagedResource):
         payload = settings.to_session_kwargs()
         payload.update(overrides)
         return cls(**payload)
+
+
+def _resource_config(
+    config: ResourceConfig | None, logger: Any | None, *, verbose: bool, debug: bool
+) -> ResourceConfig:
+    if config is None:
+        return ResourceConfig(
+            logger=logger, verbose=verbose, debug=debug, skip_logger=logger is None
+        )
+    if logger is not None:
+        # Copy instead of mutating: the caller may share the config object.
+        return config.model_copy(update={"logger": logger, "skip_logger": False})
+    return config
 
 
 # Functional-style factory aliases for DaskSession/DaskSession.from_env_prefix

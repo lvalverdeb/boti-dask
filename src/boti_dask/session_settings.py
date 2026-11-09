@@ -60,6 +60,13 @@ def _parse_env_json_mapping(raw: str, *, field_name: str) -> dict[str, Any]:
     return dict(parsed)
 
 
+def _parse_env_list(raw: str | None) -> list[str]:
+    """Comma-separated entries, blanks dropped (``{PREFIX}UPLOAD``)."""
+    if raw is None:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 def _load_dotenv_values(env_file: str | Path | None) -> dict[str, str]:
     if env_file is None:
         return {}
@@ -89,6 +96,8 @@ class DaskSessionSettings:
     watchdog_failures: int = DEFAULT_WATCHDOG_FAILURES
     # none | memory | otel (see boti_dask.telemetry); None leaves the process provider alone.
     telemetry: str | None = None
+    # Paths or requirement strings shipped to workers on open (boti_dask.upload).
+    upload: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.cluster_kind is not None:
@@ -119,6 +128,7 @@ class DaskSessionSettings:
         watchdog_interval_raw = merged.get(f"{normalized_prefix}WATCHDOG_INTERVAL")
         watchdog_failures_raw = merged.get(f"{normalized_prefix}WATCHDOG_FAILURES")
         telemetry = merged.get(f"{normalized_prefix}TELEMETRY")
+        upload_raw = merged.get(f"{normalized_prefix}UPLOAD")
 
         return cls(
             scheduler_address=scheduler_address or None,
@@ -153,6 +163,7 @@ class DaskSessionSettings:
                 _parse_env_number(watchdog_failures_raw, field_name="watchdog_failures", kind=int)
             ),
             telemetry=telemetry or None,
+            upload=_parse_env_list(upload_raw),
         )
 
     def to_session_kwargs(self) -> dict[str, Any]:
@@ -186,4 +197,6 @@ class DaskSessionSettings:
             from .telemetry import telemetry_provider
 
             payload["telemetry"] = telemetry_provider(self.telemetry)
+        if self.upload:
+            payload["upload"] = list(self.upload)
         return payload
