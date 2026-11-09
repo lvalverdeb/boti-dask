@@ -20,6 +20,40 @@ under *Changed*.
   mistyped path became a package install. Requirement strings must parse as
   PEP 508 (`packaging.requirements.Requirement`); option lines, `${VAR}`
   expansion and direct-URL requirements are refused.
+- **A shared session is rebound once, for every holder of its key.** The pool
+  entry now records its holders; a rebind points each of them at the new
+  client, so the other holders' watchdogs probe the replacement instead of
+  the client that was just closed and rebinding it in turn. The watchdog
+  passes the client it probed as `rebind(stale=...)`, which is a no-op when
+  that client has already been replaced.
+- **`DaskSession.rebind()` swaps only on success.** The replacement is opened
+  (and verified, when verification is on) before the old client is closed; a
+  failed reconnect raises and leaves the session on its previous client, open
+  and registered. The watchdog then keeps probing, doubling its interval after
+  each failed rebind up to `WatchdogConfig.max_backoff` (default 300 s), rather
+  than stopping. `Watchdog.rebind_failures` and `Watchdog.delay` expose the
+  state; `rebind_failed` events carry `next_probe_in`.
+- **`safe_*` no longer fall back to local compute in place of a cluster.** A
+  `dask_client` that was passed but is not running, with no running
+  replacement discoverable, is a `RuntimeError`; so is losing the client
+  mid-operation without a replacement to retry on (previously only
+  DataFrame-like collections raised; delayed objects and futures were computed
+  on the calling host). Calls that never named a client still run locally.
+- **Cluster primitives refuse a client that is not running** (`RuntimeError`)
+  instead of quietly returning a process-local lock, semaphore or queue that
+  gives no cluster-wide exclusion.
+- **A semaphore re-requested with a different limit is a `ValueError`**, on
+  the cluster and in the process-local fallback alike; `strict=False` adopts
+  the existing limit with a warning, as before.
+- `cluster_semaphore`, `cluster_lock` and `cluster_queue` take `namespace`,
+  prefixed into the scheduler name (`boti-dask:<namespace>:<name>`), and
+  `DaskSession.namespace` supplies one (the `shared_key`, else a digest unique
+  to the session) so two sessions on one scheduler do not share a primitive
+  by accident.
+- **Symbolic links inside an uploaded directory are not shipped.** A link in
+  the tree used to send its target's bytes to every worker; links to files
+  and directories are now skipped, and every file must resolve inside the
+  resolved root.
 
 ## [1.2.0] - 2026-11-09
 

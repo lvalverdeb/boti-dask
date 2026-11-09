@@ -168,3 +168,24 @@ def test_requirement_strings_pip_would_read_as_options_or_urls_are_refused(entry
 def test_plain_requirements_still_classify():
     for entry in ("rich", "rich>=13,<14", "rich[jupyter]>=13; python_version >= '3.10'"):
         assert classify_payload(entry).kind is PayloadKind.REQUIREMENT
+
+
+def test_symlinks_inside_an_upload_directory_are_not_shipped(package_dir, tmp_path):
+    secret = tmp_path / "outside.txt"
+    secret.write_text("token=abc\n")
+    (package_dir / "leak.py").symlink_to(secret)
+    outside_dir = tmp_path / "outside_dir"
+    outside_dir.mkdir()
+    (outside_dir / "mod.py").write_text("x = 1\n")
+    (package_dir / "linked").symlink_to(outside_dir, target_is_directory=True)
+    (package_dir / "real.py").write_text("y = 2\n")
+
+    archived: list[list[str]] = []
+
+    class ArchiveReadingClient(StubClient):
+        def upload_file(self, filename, load=True):
+            with zipfile.ZipFile(filename) as archive:
+                archived.append(sorted(archive.namelist()))
+
+    sync_uploads(ArchiveReadingClient({}), [package_dir])
+    assert archived == [["boti_upload_probe/__init__.py", "boti_upload_probe/real.py"]]

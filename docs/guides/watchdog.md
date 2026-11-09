@@ -25,12 +25,15 @@ From the environment: `{PREFIX}WATCHDOG_INTERVAL` (seconds, enables the watchdog
 
 ## What rebind does
 
-- **Managed session**: closes the client and any owned cluster, then opens again. Live persisted
+- The replacement is opened (and verified, when verification is on) before the old client is
+  closed. A failed reconnect raises and leaves the session on its previous client; the watchdog
+  keeps probing, doubling its interval after each failed rebind up to `max_backoff`.
+- **Managed session**: opens a new client (and cluster), then closes the old ones. Live persisted
   collections on the old client are lost, exactly as on close, and the same warning is raised.
-- **Shared session**: swaps the pool entry under the per-key creation lock and keeps the holder
-  count, so every holder's `safe_*` retry and every later `dask_session(shared=True)` with the same
-  key sees the new client. Holders that cached the old client object must read `session.client`
-  again.
+- **Shared session**: swaps the pool entry under the per-key creation lock, keeps the holder
+  count and points every holder of the key at the new client, so one rebind serves them all.
+  `rebind(stale=client)` does nothing when `client` has already been replaced; the watchdog uses
+  it so two holders never rebind the same outage twice.
 - **External client**: cannot be rebound; `rebind()` raises `RuntimeError`.
 
 `SessionPool.rebind_count()` counts rebinds across the process; the telemetry provider exports

@@ -75,7 +75,7 @@ def test_lock_and_queue_are_shared_by_name_on_the_cluster():
         assert sorted(q.get(timeout=5) for _ in range(3)) == [0, 1, 2]
 
 
-def test_semaphore_limit_is_first_writer_wins_on_the_cluster(caplog):
+def test_semaphore_limit_mismatch_raises_unless_strict_is_off_on_the_cluster(caplog):
     pytest.importorskip("dask.distributed")
     with dask_session(
         cluster_kwargs={
@@ -86,8 +86,10 @@ def test_semaphore_limit_is_first_writer_wins_on_the_cluster(caplog):
         }
     ) as client:
         first = cluster_semaphore("test:limit", max_leases=4, client=client)
+        with pytest.raises(ValueError, match="limit 8 requested but 4 is already set"):
+            cluster_semaphore("test:limit", max_leases=8, client=client)
         with caplog.at_level("WARNING", logger="boti_dask.primitives"):
-            second = cluster_semaphore("test:limit", max_leases=8, client=client)
+            second = cluster_semaphore("test:limit", max_leases=8, client=client, strict=False)
         assert first.max_leases == 4
         assert second.max_leases == 4
     assert any("first creator's limit wins" in r.getMessage() for r in caplog.records)
@@ -137,3 +139,49 @@ def test_bad_names_and_limits_are_rejected():
         cluster_lock("has space")
     with pytest.raises(ValueError, match="max_leases"):
         cluster_semaphore("x", max_leases=0)
+
+
+def test_semaphore_limit_mismatch_raises_locally_unless_strict_is_off(caplog):
+    first = cluster_semaphore("local:limit", max_leases=2)
+    with pytest.raises(ValueError, match="limit 3 requested but 2 is already set"):
+        cluster_semaphore("local:limit", max_leases=3)
+    with caplog.at_level("WARNING", logger="boti_dask.primitives"):
+        assert cluster_semaphore("local:limit", max_leases=3, strict=False) is first
+    assert any("first creator's limit wins" in r.getMessage() for r in caplog.records)
+    assert cluster_semaphore("local:limit", max_leases=2) is first
+
+
+class _ClosedClient:
+    status = "closed"
+
+
+def test_a_client_that_is_not_running_is_refused_rather_than_made_local():
+    for make in (
+        lambda: cluster_lock("dead:lock", client=_ClosedClient()),
+        lambda: cluster_semaphore("dead:sem", client=_ClosedClient()),
+        lambda: cluster_queue("dead:q", client=_ClosedClient()),
+    ):
+        with pytest.raises(RuntimeError, match="not running"):
+            make()
+    assert cluster_lock("dead:lock") is not None  # no client given: local is intended
+
+
+def test_namespace_keeps_sessions_apart():
+    from boti_dask.primitives import _qualified
+
+    assert _qualified("x") == "boti-dask:x"
+    assert _qualified("x", "etl") == "boti-dask:etl:x"
+    assert cluster_lock("x", namespace="a") is not cluster_lock("x", namespace="b")
+    assert cluster_lock("x", namespace="a") is cluster_lock("x", namespace="a")
+    assert cluster_queue("x", namespace="a") is not cluster_queue("x")
+    with pytest.raises(ValueError, match="namespaces"):
+        cluster_lock("x", namespace="has space")
+
+    shared = dask_session(shared=True, shared_key="my-key")
+    assert shared.namespace == "my-key"
+    managed_a, managed_b = dask_session(), dask_session()
+    assert managed_a.namespace != managed_b.namespace
+    assert " " not in managed_a.namespace
+    assert cluster_lock("x", namespace=managed_a.namespace) is not cluster_lock(
+        "x", namespace=managed_b.namespace
+    )

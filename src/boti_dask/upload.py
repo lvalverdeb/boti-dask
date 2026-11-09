@@ -62,10 +62,20 @@ def _file_digest(path: Path) -> str:
 
 
 def _directory_files(root: Path) -> Iterator[Path]:
+    """Regular files under *root*, caches and ``.pyc`` left out.
+
+    Symbolic links are skipped, file and directory alike, and every file must
+    resolve inside the resolved root: a link in the tree would otherwise ship
+    its target's contents to every worker.
+    """
+    base = root.resolve()
     for path in sorted(root.rglob("*")):
-        if path.is_file() and not (_SKIPPED_PARTS & set(path.relative_to(root).parts)):
-            if path.suffix != ".pyc":
-                yield path
+        if path.is_symlink() or not path.is_file() or path.suffix == ".pyc":
+            continue
+        if _SKIPPED_PARTS & set(path.relative_to(root).parts):
+            continue
+        if base in path.resolve().parents:
+            yield path
 
 
 def _zip_directory(root: Path, target: Path) -> None:

@@ -186,3 +186,32 @@ def test_dask_is_probably_empty_logs_debug_when_len_fails(caplog):
     assert any(
         "len() failed in dask_is_probably_empty" in record.message for record in caplog.records
     )
+
+
+class _DeadClient:
+    status = "closed"
+
+
+class _LosingClient:
+    """Running, but the scheduler goes away mid-operation."""
+
+    status = "running"
+
+    def compute(self, obj):
+        self.status = "closed"
+        raise OSError("scheduler gone")
+
+
+def test_safe_compute_refuses_a_dead_explicit_client(monkeypatch):
+    monkeypatch.setattr(resilience_module, "get_client", lambda: None)
+    delayed_value = dask.delayed(lambda: 1)()
+    with pytest.raises(RuntimeError, match="not running.*not falling back to local compute"):
+        safe_compute(delayed_value, dask_client=_DeadClient())
+    assert safe_compute(delayed_value) == 1  # no client asked for: local is still fine
+
+
+def test_safe_compute_does_not_fall_back_locally_after_losing_the_client(monkeypatch):
+    monkeypatch.setattr(resilience_module, "get_client", lambda: None)
+    delayed_value = dask.delayed(lambda: 1)()
+    with pytest.raises(RuntimeError, match="client was lost.*not falling back to local compute"):
+        safe_compute(delayed_value, dask_client=_LosingClient())

@@ -71,6 +71,8 @@ def test_config_validation():
         WatchdogConfig(interval=0)
     with pytest.raises(ValueError, match="failures_before_rebind"):
         WatchdogConfig(failures_before_rebind=0)
+    with pytest.raises(ValueError, match="max_backoff"):
+        WatchdogConfig(interval=10, max_backoff=5)
 
 
 def test_tick_counts_failures_and_rebinds_at_threshold(stub_client):
@@ -194,7 +196,9 @@ def test_rebind_failure_is_reported_and_retried_next_tick(stub_client, monkeypat
     )
     session.open()
     try:
-        monkeypatch.setattr(session, "rebind", lambda: (_ for _ in ()).throw(OSError("still down")))
+        monkeypatch.setattr(
+            session, "rebind", lambda **_kw: (_ for _ in ()).throw(OSError("still down"))
+        )
         stub_client.healthy = False
         session.watchdog.tick()
         assert [e["event"] for e in events] == ["probe_failed", "rebinding", "rebind_failed"]
@@ -250,3 +254,141 @@ def test_watchdog_stops_itself_when_the_session_is_closed(stub_client):
     assert stopped.wait(2)
     _wait_for(lambda: not watchdog.running)
     session.close()
+
+
+def _shared_holder(key: str, events: list[dict]) -> DaskSession:
+    return DaskSession(
+        scheduler_address="tcp://stub:1",
+        shared=True,
+        shared_key=key,
+        verify_connectivity=False,
+        watchdog=WatchdogConfig(
+            interval=60,
+            failures_before_rebind=2,
+            check=ConnectivityCheck(timeout=0.2),
+            on_event=events.append,
+        ),
+    )
+
+
+def test_shared_holders_rebind_once_and_all_see_the_new_client(stub_client):
+    """Two holders of one key, both probes failing: one rebind, one new client, no churn."""
+    key = "watchdog-shared-churn"
+    events: list[dict] = []
+    holders = [_shared_holder(key, events) for _ in range(2)]
+    first = [h.open() for h in holders]
+    assert first[0] is first[1]
+    rebinds_before = pool.rebind_count()
+    try:
+        stub_client.healthy = False
+        for holder in holders:
+            holder.watchdog.tick()  # both at one failure
+        holders[0].watchdog.tick()  # second failure: this holder rebinds
+        stub_client.healthy = True  # the replacement is reachable
+        for _ in range(3):
+            for holder in holders:
+                holder.watchdog.tick()
+        replacement = holders[0].client
+        assert replacement is not first[0]
+        assert holders[1].client is replacement
+        assert pool.get_shared_session(key)["client"] is replacement
+        assert pool.get_shared_session(key)["ref_count"] == 2
+        assert pool.rebind_count() == rebinds_before + 1
+        assert len(stub_client.instances) == 2
+        assert first[0].close_count == 1 and replacement.close_count == 0
+        assert [e["event"] for e in events].count("rebound") == 1
+        # The second holder never had to rebind: its next probe saw the new client.
+        assert holders[1].watchdog.rebinds == 0 and holders[1].watchdog.failures == 0
+    finally:
+        for holder in holders:
+            holder.close()
+    assert key not in pool.debug_shared_session_keys()
+
+
+def test_rebind_with_a_stale_client_that_was_already_replaced_is_a_no_op(stub_client):
+    key = "watchdog-shared-stale"
+    holders = [
+        DaskSession(
+            scheduler_address="tcp://stub:1", shared=True, shared_key=key, verify_connectivity=False
+        )
+        for _ in range(2)
+    ]
+    old = [h.open() for h in holders]
+    try:
+        new = holders[0].rebind()
+        assert holders[1].rebind(stale=old[1]) is new  # the other holder's view is current
+        assert len(stub_client.instances) == 2
+    finally:
+        for holder in holders:
+            holder.close()
+
+
+class FlakyClient(StubClient):
+    """Refuses to construct while ``reachable`` is False, as a scheduler that is down would."""
+
+    reachable = True
+
+    def __init__(self, address, **kwargs) -> None:
+        if not FlakyClient.reachable:
+            raise OSError("connect refused")
+        # Swap-on-success: the client being replaced must still be open here.
+        assert all(c.close_count == 0 for c in StubClient.instances), "old client closed early"
+        super().__init__(address, **kwargs)
+
+
+def test_failed_rebind_keeps_the_old_client_and_the_watchdog_backs_off(monkeypatch):
+    StubClient.healthy = True
+    StubClient.instances = []
+    FlakyClient.reachable = True
+    monkeypatch.setattr(session_module, "Client", FlakyClient)
+    events: list[dict] = []
+    session = DaskSession(
+        scheduler_address="tcp://stub:1",
+        verify_connectivity=False,
+        watchdog=WatchdogConfig(
+            interval=0.05,
+            failures_before_rebind=1,
+            max_backoff=0.2,
+            check=ConnectivityCheck(timeout=0.2),
+            on_event=events.append,
+        ),
+    )
+    first = session.open()
+    watchdog = session.watchdog
+    try:
+        StubClient.healthy = False
+        FlakyClient.reachable = False
+        _wait_for(lambda: watchdog.rebind_failures >= 2)
+        assert session.client is first and first.close_count == 0
+        assert not session.closed
+        assert watchdog.running
+        assert watchdog.delay == 0.2  # 0.05 * 2**2, capped at max_backoff
+        assert [e["event"] for e in events].count("stopped") == 0
+
+        FlakyClient.reachable = True
+        _wait_for(lambda: watchdog.rebinds == 1)
+        assert session.client is not first and first.close_count == 1
+        assert watchdog.rebind_failures == 0 and watchdog.delay == 0.05
+    finally:
+        session.close()
+    assert not watchdog.running
+
+
+def test_rebind_rejected_by_verification_keeps_the_old_client(stub_client):
+    """With verification on, a replacement that fails its probe is discarded, not adopted."""
+    session = DaskSession(
+        scheduler_address="tcp://stub:1", verify_connectivity=ConnectivityCheck(timeout=0.2)
+    )
+    first = session.open()
+    try:
+        stub_client.healthy = False
+        with pytest.raises(Exception):
+            session.rebind()
+        assert session.client is first and first.close_count == 0
+        assert not session.closed
+        assert pool.is_client_registered(first)
+        rejected = [c for c in stub_client.instances if c is not first]
+        assert len(rejected) == 1 and rejected[0].close_count == 1
+        assert not pool.is_client_registered(rejected[0])
+    finally:
+        session.close()

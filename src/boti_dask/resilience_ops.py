@@ -141,11 +141,7 @@ class _SyncCallContext(NamedTuple):
 
 
 def _handle_recoverable_dask_error(
-    ctx: _SyncCallContext,
-    *,
-    active_client: Any | None,
-    metrics: dict[str, Any] | None,
-    exc: Exception,
+    ctx: _SyncCallContext, *, active_client: Any | None, exc: Exception
 ) -> Any:
     _log(
         ctx.logger,
@@ -158,12 +154,25 @@ def _handle_recoverable_dask_error(
     if retry_client is not None:
         telemetry.add("retries", operation=ctx.operation_name)
         return ctx.remote_op(ctx.obj, retry_client, timeout=ctx.timeout)
-    if metrics and metrics.get("is_dask") and _is_dask_dataframe_like(ctx.obj):
+    if active_client is not None:
+        # The work was meant for the cluster: running it on this host instead
+        # would hide the outage and, for a DataFrame-like collection, fail on
+        # the lost graph anyway. Rebuild the collection before retrying.
         raise RuntimeError(
-            "Distributed client lost and cannot be retried safely for a Dask DataFrame-like "
-            "collection. Rebuild the collection before retrying."
+            f"{ctx.operation_name}: the distributed client was lost and no running "
+            "replacement was found; not falling back to local compute."
         ) from exc
     return ctx.local_op(ctx.obj)
+
+
+def _require_client_if_given(operation_name: str, given: Any | None, active: Any | None) -> None:
+    """A caller who passed a client asked for the cluster: never run locally in its place."""
+    if given is not None and active is None:
+        raise RuntimeError(
+            f"{operation_name}: the dask_client passed is not running (status="
+            f"{getattr(given, 'status', None)!r}) and no running replacement was found; "
+            "not falling back to local compute."
+        )
 
 
 def _execute_sync(
@@ -177,20 +186,20 @@ def _execute_sync(
     dry_run: bool = False,
     timeout: float | None = None,
 ) -> Any:
-    metrics = inspect_graph(obj, logger=logger) if _is_dask_collection(obj) else None
+    if _is_dask_collection(obj):
+        inspect_graph(obj, logger=logger)
     if dry_run:
         _log(logger, "info", f"{operation_name}: dry run requested; execution skipped.")
         return None
 
     active_client = _resolve_active_client(dask_client)
+    _require_client_if_given(operation_name, dask_client, active_client)
     ctx = _SyncCallContext(operation_name, obj, remote_op, local_op, timeout, logger)
     with get_telemetry().span(operation_name, remote=active_client is not None):
-        return _run_with_recovery(ctx, active_client=active_client, metrics=metrics)
+        return _run_with_recovery(ctx, active_client=active_client)
 
 
-def _run_with_recovery(
-    ctx: _SyncCallContext, *, active_client: Any | None, metrics: dict[str, Any] | None
-) -> Any:
+def _run_with_recovery(ctx: _SyncCallContext, *, active_client: Any | None) -> Any:
     try:
         return (
             ctx.remote_op(ctx.obj, active_client, timeout=ctx.timeout)
@@ -198,9 +207,7 @@ def _run_with_recovery(
             else ctx.local_op(ctx.obj)
         )
     except RECOVERABLE_DASK_ERRORS as exc:
-        return _handle_recoverable_dask_error(
-            ctx, active_client=active_client, metrics=metrics, exc=exc
-        )
+        return _handle_recoverable_dask_error(ctx, active_client=active_client, exc=exc)
     except Exception as exc:
         translated = _translate_orphaned_graph_error(
             operation_name=ctx.operation_name,

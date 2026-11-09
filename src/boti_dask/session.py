@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
-import warnings
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -29,7 +29,7 @@ from .session_helpers import (
     recommended_dask_config,
 )
 from .session_pool import SessionPool, pool
-from .session_rebind import SessionRebindMixin
+from .session_rebind import SessionRebindMixin, _close_owned_connection
 from .session_settings import DaskSessionSettings
 from .watchdog import WatchdogConfig
 
@@ -37,6 +37,7 @@ from .watchdog import WatchdogConfig
 # (debug level only). Kept here because tests scope caplog to the
 # "boti_dask.session" logger and monkeypatch get_client via this module.
 _module_log = logging.getLogger(__name__)
+_NAMESPACE_DIGEST_CHARS = 16
 
 
 def describe_client(client: Any) -> dict[str, Any]:
@@ -127,6 +128,7 @@ class DaskSession(SessionRebindMixin, ManagedResource):
         self._owns_client: bool = False
         self._owns_cluster: bool = False
         self._shared_session_key: str | None = None
+        self._rebinding: bool = False
 
     # -- context manager: returns the client, not the session. __enter__ is
     # overridable for session-style resources; __exit__ stays final.
@@ -150,6 +152,19 @@ class DaskSession(SessionRebindMixin, ManagedResource):
             self.cluster_kwargs,
             self.client_kwargs,
         )
+
+    @property
+    def namespace(self) -> str:
+        """Prefix for this session's cluster primitives (:mod:`boti_dask.primitives`).
+
+        The explicit ``shared_key`` when given; otherwise a digest of the derived
+        pool key for a shared session, or of this object's identity for a
+        managed one, so two sessions never share a primitive by accident.
+        """
+        if self.shared_key is not None:
+            return self.shared_key
+        seed = self._shared_key() if self.shared else f"managed:{id(self):x}"
+        return hashlib.sha256(seed.encode()).hexdigest()[:_NAMESPACE_DIGEST_CHARS]
 
     def _verify_client_if_requested(self, client: Any) -> None:
         if self.connectivity is None:
@@ -197,17 +212,22 @@ class DaskSession(SessionRebindMixin, ManagedResource):
         return self._create_local_cluster_session()
 
     def _verify_or_abort(self, client: Any) -> None:
-        """Run connectivity verification if requested; on failure, close() and re-raise."""
+        """Run connectivity verification if requested; on failure, close() and re-raise.
+
+        During a rebind the session stays open: the caller discards the
+        rejected connection and keeps the previous client.
+        """
         try:
             self._verify_client_if_requested(client)
         except Exception:
-            self.close()
+            if not self._rebinding:
+                self.close()
             raise
 
     def _reuse_shared_session(self) -> Any | None:
         """Reuse the existing shared session for this key, if one is live; else None."""
         session_key = self._shared_key()
-        acquired = pool.try_acquire_shared_session(session_key)
+        acquired = pool.try_acquire_shared_session(session_key, holder=self)
         if acquired is None:
             return None
         client = acquired["client"]
@@ -225,7 +245,9 @@ class DaskSession(SessionRebindMixin, ManagedResource):
         """Connect directly to an existing scheduler address."""
         client = _open_client(Client, self.scheduler_address, self.client_kwargs, self.connectivity)
         if self.shared:
-            pool.register_shared_session(self._shared_key(), client=client, cluster=None)
+            pool.register_shared_session(
+                self._shared_key(), client=client, cluster=None, holder=self
+            )
             self.client = client
             self._shared_session_key = self._shared_key()
         else:
@@ -258,7 +280,9 @@ class DaskSession(SessionRebindMixin, ManagedResource):
             raise
 
         if self.shared:
-            pool.register_shared_session(self._shared_key(), client=client, cluster=cluster)
+            pool.register_shared_session(
+                self._shared_key(), client=client, cluster=cluster, holder=self
+            )
             self.client = client
             self._cluster = cluster
             self._shared_session_key = self._shared_key()
@@ -286,7 +310,9 @@ class DaskSession(SessionRebindMixin, ManagedResource):
         # Shared session: decrement ref count; only close when it hits zero.
         if self._shared_session_key is not None and self.client is not None:
             try:
-                pool.release_shared_session(self._shared_session_key, logger=self.logger)
+                pool.release_shared_session(
+                    self._shared_session_key, logger=self.logger, holder=self
+                )
             finally:
                 self.client = None
                 self._cluster = None
@@ -299,30 +325,13 @@ class DaskSession(SessionRebindMixin, ManagedResource):
 
     def _release_managed_connection(self) -> None:
         """Close an owned client and cluster, warning about live persisted collections."""
-        try:
-            if self._owns_client and self.client is not None:
-                live = pool.live_persisted_collection_count(self.client)
-                if live:
-                    msg = (
-                        "Closing managed Dask session with "
-                        f"{live} live persisted collection(s). "
-                        "Those collections will become unusable after the session closes; "
-                        "compute or preview them inside the session, or keep the client open. "
-                        "Later head()/compute() calls may fail with Missing dependency."
-                    )
-                    warnings.warn(msg, RuntimeWarning, stacklevel=2)
-                    if self.logger is not None:
-                        self.logger.warning(msg)
-                pool.close_client(self.client)
-        finally:
-            if self.client is not None:
-                pool.unregister_managed_client(self.client)
-            self.client = None
-            self._owns_client = False
-            if self._owns_cluster and self._cluster is not None:
-                self._cluster.close()
-            self._cluster = None
-            self._owns_cluster = False
+        client = self.client if self._owns_client else None
+        cluster = self._cluster if self._owns_cluster else None
+        self.client = None
+        self._owns_client = False
+        self._cluster = None
+        self._owns_cluster = False
+        _close_owned_connection(client, cluster, logger=self.logger)
 
     async def _acleanup(self) -> None:
         await asyncio.to_thread(self._cleanup)

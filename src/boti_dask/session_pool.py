@@ -142,39 +142,78 @@ class SessionPool:
                 self._shared_creation_locks[key] = lock
             return lock
 
-    def register_shared_session(self, key: str, *, client: Any, cluster: Any | None) -> None:
+    def register_shared_session(
+        self, key: str, *, client: Any, cluster: Any | None, holder: Any | None = None
+    ) -> None:
+        """Register *client* under *key* with one holder (*holder*, when given)."""
         self.register_managed_client(client)
+        holders: weakref.WeakSet[Any] = weakref.WeakSet()
+        if holder is not None:
+            holders.add(holder)
         with self._lock:
             self._shared_sessions[key] = {
                 "client": client,
                 "cluster": cluster,
                 "ref_count": 1,
+                "holders": holders,
             }
 
     def detach_shared_session(self, key: str) -> dict[str, Any] | None:
-        """Remove and return the entry for *key* (with its ``ref_count``) without closing it.
+        """Remove and return the entry for *key* (ref count and holders included) without closing it.
 
-        Used by :meth:`DaskSession.rebind`, which closes the old client itself
-        and registers the replacement under the same key and holder count.
+        Used by :meth:`DaskSession.rebind`, which registers the replacement
+        under the same key, then carries the holders over with
+        :meth:`carry_over_shared_holders` and closes the old client itself.
         """
         with self._lock:
             return self._shared_sessions.pop(key, None)
+
+    def restore_shared_session(self, key: str, entry: dict[str, Any] | None) -> None:
+        """Put back an entry taken with :meth:`detach_shared_session` after a failed rebind."""
+        if entry is None:
+            return
+        with self._lock:
+            self._shared_sessions[key] = entry
+
+    def carry_over_shared_holders(self, key: str, previous: dict[str, Any] | None) -> list[Any]:
+        """Give the entry now registered under *key* the holder count and holders of *previous*.
+
+        Returns the live holders so the caller can point each at the new client.
+        """
+        if previous is None:
+            return []
+        with self._lock:
+            entry = self._shared_sessions.get(key)
+            if entry is None:
+                return []
+            entry["ref_count"] = int(previous.get("ref_count", 1))
+            entry["holders"].update(previous.get("holders", ()))
+            return list(entry["holders"])
 
     def set_shared_ref_count(self, key: str, count: int) -> None:
         with self._lock:
             if key in self._shared_sessions:
                 self._shared_sessions[key]["ref_count"] = count
 
+    def shared_holder_count(self, key: str) -> int:
+        """Live :class:`DaskSession` objects holding *key* (testing and diagnostics)."""
+        with self._lock:
+            entry = self._shared_sessions.get(key)
+            return len(entry["holders"]) if entry is not None else 0
+
     def get_shared_session(self, key: str) -> dict[str, Any] | None:
         with self._lock:
             entry = self._shared_sessions.get(key)
             return dict(entry) if entry is not None else None
 
-    def try_acquire_shared_session(self, key: str) -> dict[str, Any] | None:
+    def try_acquire_shared_session(
+        self, key: str, *, holder: Any | None = None
+    ) -> dict[str, Any] | None:
         """Atomically check for a shared session and increment ref_count.
 
         Returns a dict with ``client`` / ``cluster`` keys if acquired,
         or ``None`` if the session does not exist or the client is gone.
+        *holder* joins the entry's holders, which a rebind updates in place.
         """
         with self._lock:
             entry = self._shared_sessions.get(key)
@@ -185,15 +224,21 @@ class SessionPool:
                 self._shared_sessions.pop(key, None)
                 return None
             entry["ref_count"] = int(entry.get("ref_count", 0)) + 1
+            if holder is not None:
+                entry["holders"].add(holder)
             return {"client": client, "cluster": entry.get("cluster")}
 
-    def release_shared_session(self, key: str, *, logger: Any | None = None) -> None:
+    def release_shared_session(
+        self, key: str, *, logger: Any | None = None, holder: Any | None = None
+    ) -> None:
         client: Any | None = None
         cluster: Any | None = None
         with self._lock:
             entry = self._shared_sessions.get(key)
             if entry is None:
                 return
+            if holder is not None:
+                entry["holders"].discard(holder)
             entry["ref_count"] = int(entry.get("ref_count", 0)) - 1
             if entry["ref_count"] > 0:
                 _log(
