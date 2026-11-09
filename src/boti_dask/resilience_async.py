@@ -14,6 +14,18 @@ from typing import Any
 from ._internal import _is_dask_dataframe_like, _log
 from .resilience import _to_int_safe, dask_is_probably_empty
 from .resilience_ops import safe_compute, safe_gather, safe_head, safe_persist, safe_wait
+from .telemetry import get_telemetry
+
+
+async def _offload(operation_name: str, fn: Any, obj: Any, **kwargs: Any) -> Any:
+    """Run a sync safe_* wrapper in a thread under a span opened in the caller's context.
+
+    The inner wrapper opens its own span too, but that one lives on the
+    worker thread; this outer span is the one that nests under the caller's
+    trace.
+    """
+    with get_telemetry().span(operation_name):
+        return await asyncio.to_thread(fn, obj, **kwargs)
 
 
 def _non_dask_is_empty(obj: Any, *, logger: Any | None) -> bool:
@@ -88,7 +100,8 @@ async def async_safe_compute(
     logger: Any | None = None,
     dry_run: bool = False,
 ) -> Any:
-    return await asyncio.to_thread(
+    return await _offload(
+        "async_safe_compute",
         safe_compute,
         obj,
         dask_client=dask_client,
@@ -105,7 +118,8 @@ async def async_safe_persist(
     dask_client: Any | None = None,
     logger: Any | None = None,
 ) -> Any:
-    return await asyncio.to_thread(
+    return await _offload(
+        "async_safe_persist",
         safe_persist,
         obj,
         dask_client=dask_client,
@@ -122,7 +136,8 @@ async def async_safe_wait(
     timeout: float | None = None,
     logger: Any | None = None,
 ) -> Any:
-    return await asyncio.to_thread(
+    return await _offload(
+        "async_safe_wait",
         safe_wait,
         obj,
         dask_client=dask_client,
@@ -142,7 +157,8 @@ async def async_safe_head(
     logger: Any | None = None,
     dry_run: bool = False,
 ) -> Any:
-    return await asyncio.to_thread(
+    return await _offload(
+        "async_safe_head",
         safe_head,
         obj,
         n=n,
@@ -162,7 +178,8 @@ async def async_safe_gather(
     logger: Any | None = None,
     dry_run: bool = False,
 ) -> Any:
-    return await asyncio.to_thread(
+    return await _offload(
+        "async_safe_gather",
         safe_gather,
         obj,
         dask_client=dask_client,

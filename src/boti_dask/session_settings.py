@@ -87,6 +87,8 @@ class DaskSessionSettings:
     # A positive number of seconds turns on the watchdog (see boti_dask.watchdog).
     watchdog_interval: float | None = None
     watchdog_failures: int = DEFAULT_WATCHDOG_FAILURES
+    # none | memory | otel (see boti_dask.telemetry); None leaves the process provider alone.
+    telemetry: str | None = None
 
     def __post_init__(self) -> None:
         if self.cluster_kind is not None:
@@ -116,6 +118,7 @@ class DaskSessionSettings:
         cluster_kind = merged.get(f"{normalized_prefix}CLUSTER_KIND")
         watchdog_interval_raw = merged.get(f"{normalized_prefix}WATCHDOG_INTERVAL")
         watchdog_failures_raw = merged.get(f"{normalized_prefix}WATCHDOG_FAILURES")
+        telemetry = merged.get(f"{normalized_prefix}TELEMETRY")
 
         return cls(
             scheduler_address=scheduler_address or None,
@@ -149,6 +152,7 @@ class DaskSessionSettings:
             else int(
                 _parse_env_number(watchdog_failures_raw, field_name="watchdog_failures", kind=int)
             ),
+            telemetry=telemetry or None,
         )
 
     def to_session_kwargs(self) -> dict[str, Any]:
@@ -178,4 +182,8 @@ class DaskSessionSettings:
             payload["watchdog"] = WatchdogConfig(
                 interval=self.watchdog_interval, failures_before_rebind=self.watchdog_failures
             )
+        if self.telemetry:
+            from .telemetry import telemetry_provider
+
+            payload["telemetry"] = telemetry_provider(self.telemetry)
         return payload

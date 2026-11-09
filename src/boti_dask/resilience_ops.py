@@ -22,6 +22,7 @@ from .resilience import (
     _is_dask_collection,
 )
 from .session import pool
+from .telemetry import get_telemetry
 
 try:
     from dask.distributed import wait as distributed_wait
@@ -151,8 +152,11 @@ def _handle_recoverable_dask_error(
         "warning",
         f"{ctx.operation_name}: recoverable failure ({type(exc).__name__}); retrying once.",
     )
+    telemetry = get_telemetry()
+    telemetry.add("recoverable_errors", operation=ctx.operation_name, error=type(exc).__name__)
     retry_client = _retry_client(active_client)
     if retry_client is not None:
+        telemetry.add("retries", operation=ctx.operation_name)
         return ctx.remote_op(ctx.obj, retry_client, timeout=ctx.timeout)
     if metrics and metrics.get("is_dask") and _is_dask_dataframe_like(ctx.obj):
         raise RuntimeError(
@@ -180,11 +184,18 @@ def _execute_sync(
 
     active_client = _resolve_active_client(dask_client)
     ctx = _SyncCallContext(operation_name, obj, remote_op, local_op, timeout, logger)
+    with get_telemetry().span(operation_name, remote=active_client is not None):
+        return _run_with_recovery(ctx, active_client=active_client, metrics=metrics)
+
+
+def _run_with_recovery(
+    ctx: _SyncCallContext, *, active_client: Any | None, metrics: dict[str, Any] | None
+) -> Any:
     try:
         return (
-            remote_op(obj, active_client, timeout=timeout)
+            ctx.remote_op(ctx.obj, active_client, timeout=ctx.timeout)
             if active_client is not None
-            else local_op(obj)
+            else ctx.local_op(ctx.obj)
         )
     except RECOVERABLE_DASK_ERRORS as exc:
         return _handle_recoverable_dask_error(
@@ -192,8 +203,8 @@ def _execute_sync(
         )
     except Exception as exc:
         translated = _translate_orphaned_graph_error(
-            operation_name=operation_name,
-            obj=obj,
+            operation_name=ctx.operation_name,
+            obj=ctx.obj,
             exc=exc,
         )
         if translated is not exc:

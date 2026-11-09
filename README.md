@@ -9,6 +9,7 @@ Dask runtime/session/resilience utilities for the Boti ecosystem.
 - Diagnostics: `docs/api/diagnostics.md`
 - Clusters: `docs/api/clusters.md`
 - Watchdog: `docs/api/watchdog.md`
+- Telemetry: `docs/api/telemetry.md`
 - Primitives: `docs/api/primitives.md`
 
 ## Phase-1 scope

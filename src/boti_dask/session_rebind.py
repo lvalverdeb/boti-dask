@@ -11,6 +11,7 @@ import logging
 from typing import Any
 
 from .session_pool import pool
+from .telemetry import configure_telemetry, get_telemetry
 from .watchdog import Watchdog, WatchdogConfig
 
 _module_log = logging.getLogger(__name__)
@@ -32,12 +33,27 @@ def _close_quietly(client: Any | None, cluster: Any | None) -> None:
             _module_log.debug("cluster.close failed during rebind", exc_info=True)
 
 
+def _client_gauges(client: Any) -> dict[str, float]:
+    """Workers and executing tasks from one ``scheduler_info()`` call; zeros when it fails."""
+    try:
+        workers = client.scheduler_info().get("workers", {})
+    except Exception:
+        _module_log.debug("scheduler_info() failed while recording gauges", exc_info=True)
+        workers = {}
+    executing = sum(
+        int((worker.get("metrics") or {}).get("executing", 0) or 0) for worker in workers.values()
+    )
+    return {"workers": float(len(workers)), "task_count": float(executing)}
+
+
 class SessionRebindMixin:
-    """Adds :meth:`rebind` and the optional :class:`Watchdog` to a session."""
+    """Adds :meth:`rebind`, the optional :class:`Watchdog` and telemetry gauges to a session."""
 
     # Provided by DaskSession.
     client: Any | None
     logger: Any | None
+    shared_key: str | None
+    telemetry: Any | None
     watchdog_config: WatchdogConfig | None
     _watchdog: Watchdog | None
     _cluster: Any | None
@@ -53,6 +69,26 @@ class SessionRebindMixin:
             return
         self._watchdog = Watchdog(self, self.watchdog_config, logger=self.logger)
         self._watchdog.start()
+
+    # -- telemetry -------------------------------------------------------------
+
+    def _install_telemetry(self) -> None:
+        """Make this session's provider the process provider, then publish the gauges."""
+        if self.telemetry is not None:
+            configure_telemetry(self.telemetry)
+        self.record_gauges()
+
+    def record_gauges(self) -> dict[str, float]:
+        """Publish ``workers``, ``persisted_collections`` and ``task_count`` for the client."""
+        client = self.client
+        if client is None:
+            return {}
+        values = _client_gauges(client)
+        values["persisted_collections"] = float(pool.live_persisted_collection_count(client))
+        telemetry = get_telemetry()
+        for name, value in values.items():
+            telemetry.gauge(name, value, shared_key=self.shared_key)
+        return values
 
     def _stop_watchdog(self) -> None:
         if self._watchdog is not None:
@@ -87,6 +123,8 @@ class SessionRebindMixin:
             with pool.shared_creation_lock(key):
                 client = self._rebind_shared(key)
         pool.record_rebind()
+        get_telemetry().add("rebinds", shared_key=self.shared_key)
+        self.record_gauges()
         if self.logger is not None:
             self.logger.warning(
                 "Rebound Dask session key=%r to %s",

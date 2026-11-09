@@ -22,6 +22,7 @@ from .session_helpers import (
     DaskSessionUnavailable,
     _open_client,
     _prepare_cluster_kwargs,
+    _resolve_connectivity,
     _stable_mapping_repr,
     _verify_client_connection,
     apply_recommended_dask_config,
@@ -86,6 +87,10 @@ class DaskSession(SessionRebindMixin, ManagedResource):
     skip, or a :class:`ConnectivityCheck` to change the deadline or worker count.
     A failed check raises :class:`DaskSessionUnavailable` instead of hanging.
 
+    ``telemetry`` (a :class:`~boti_dask.telemetry.TelemetryProvider`) becomes the
+    process provider on open, so the ``safe_*`` wrappers and the watchdog report
+    through it; see :mod:`boti_dask.telemetry`.
+
     ``watchdog`` (a :class:`WatchdogConfig`) keeps probing the client on a
     daemon thread after open and calls :meth:`rebind` once the configured number
     of consecutive probes fail. It applies to clients the session creates, not
@@ -104,6 +109,7 @@ class DaskSession(SessionRebindMixin, ManagedResource):
         shared_key: str | None = None,
         verify_connectivity: bool | ConnectivityCheck = True,
         watchdog: WatchdogConfig | None = None,
+        telemetry: Any | None = None,
         config: ResourceConfig | None = None,
         verbose: bool = False,
         debug: bool = False,
@@ -130,6 +136,7 @@ class DaskSession(SessionRebindMixin, ManagedResource):
         self.shared_key = shared_key
         self.connectivity: ConnectivityCheck | None = _resolve_connectivity(verify_connectivity)
         self.watchdog_config = watchdog
+        self.telemetry = telemetry
 
         # Runtime state
         self._watchdog = None
@@ -138,9 +145,8 @@ class DaskSession(SessionRebindMixin, ManagedResource):
         self._owns_cluster: bool = False
         self._shared_session_key: str | None = None
 
-    # -- context manager (returns the client instead of the session) ----------
-    # ManagedResource.__enter__ is intentionally overridable for session-style
-    # resources; __exit__ stays final so close() always runs.
+    # -- context manager: returns the client, not the session. __enter__ is
+    # overridable for session-style resources; __exit__ stays final.
 
     def __enter__(self) -> Any:
         self._assert_open()
@@ -197,6 +203,7 @@ class DaskSession(SessionRebindMixin, ManagedResource):
                 client = self._open_connection()
         else:
             client = self._open_connection()
+        self._install_telemetry()
         self._start_watchdog()
         return client
 
@@ -356,12 +363,6 @@ class DaskSession(SessionRebindMixin, ManagedResource):
         payload = settings.to_session_kwargs()
         payload.update(overrides)
         return cls(**payload)
-
-
-def _resolve_connectivity(value: bool | ConnectivityCheck) -> ConnectivityCheck | None:
-    if isinstance(value, ConnectivityCheck):
-        return value
-    return ConnectivityCheck() if value else None
 
 
 # Functional-style factory aliases for DaskSession/DaskSession.from_env_prefix

@@ -36,6 +36,8 @@ extra = [
 k8s = ["dask-kubernetes>=2025.1.0,<2027.0.0"]
 slurm = ["dask-jobqueue>=0.9.0,<1.0.0"]
 coiled = ["coiled>=1.0.0,<2.0.0"]
+# OpenTelemetryProvider (boti_dask.telemetry).
+otel = ["opentelemetry-api>=1.30.0,<2.0.0", "opentelemetry-sdk>=1.30.0,<2.0.0"]
 
 [project.urls]
 Homepage = "https://github.com/lvalverdeb/boti-dask"

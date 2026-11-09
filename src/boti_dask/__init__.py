@@ -20,6 +20,13 @@ _LAZY = {
     "CLUSTER_KINDS": ("boti_dask.clusters", "CLUSTER_KINDS"),
     "cluster_factory": ("boti_dask.clusters", "cluster_factory"),
     "make_cluster": ("boti_dask.clusters", "make_cluster"),
+    # Telemetry: spans around safe_* and session counters/gauges; no-op by default.
+    "InMemoryProvider": ("boti_dask.telemetry", "InMemoryProvider"),
+    "NoopProvider": ("boti_dask.telemetry", "NoopProvider"),
+    "OpenTelemetryProvider": ("boti_dask.telemetry", "OpenTelemetryProvider"),
+    "TelemetryProvider": ("boti_dask.telemetry", "TelemetryProvider"),
+    "configure_telemetry": ("boti_dask.telemetry", "configure_telemetry"),
+    "get_telemetry": ("boti_dask.telemetry", "get_telemetry"),
     # Cluster-wide primitives with process-local fallbacks (Dask only if a client exists).
     "cluster_lock": ("boti_dask.primitives", "cluster_lock"),
     "cluster_queue": ("boti_dask.primitives", "cluster_queue"),

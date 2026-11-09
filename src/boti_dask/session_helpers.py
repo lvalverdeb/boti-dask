@@ -59,6 +59,12 @@ class ConnectivityCheck:
             raise ValueError("ConnectivityCheck.min_workers must be at least 1.")
 
 
+def _resolve_connectivity(value: bool | ConnectivityCheck) -> ConnectivityCheck | None:
+    if isinstance(value, ConnectivityCheck):
+        return value
+    return ConnectivityCheck() if value else None
+
+
 def _probe_task() -> int:
     return 1
 
