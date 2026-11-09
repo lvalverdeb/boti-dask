@@ -16,6 +16,10 @@ _LAZY = {
     "describe_frame": ("boti_dask.diagnostics", "describe_frame"),
     "diagnostics_logger": ("boti_dask.diagnostics", "diagnostics_logger"),
     "inspect_graph": ("boti_dask.diagnostics", "inspect_graph"),
+    # Cluster-wide primitives with process-local fallbacks (Dask only if a client exists).
+    "cluster_lock": ("boti_dask.primitives", "cluster_lock"),
+    "cluster_queue": ("boti_dask.primitives", "cluster_queue"),
+    "cluster_semaphore": ("boti_dask.primitives", "cluster_semaphore"),
     # Dask-touching: the session and the resilient execution wrappers.
     "ConnectivityCheck": ("boti_dask.session_helpers", "ConnectivityCheck"),
     "DaskSession": ("boti_dask.session", "DaskSession"),

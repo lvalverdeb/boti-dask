@@ -313,7 +313,7 @@ class DaskSession(ManagedResource):
                     warnings.warn(msg, RuntimeWarning, stacklevel=2)
                     if self.logger is not None:
                         self.logger.warning(msg)
-                self.client.close()
+                pool.close_client(self.client)
         finally:
             if self.client is not None:
                 pool.unregister_managed_client(self.client)

@@ -7,6 +7,7 @@ Dask runtime/session/resilience utilities for the Boti ecosystem.
 - Session: `docs/api/session.md`
 - Resilience: `docs/api/resilience.md`
 - Diagnostics: `docs/api/diagnostics.md`
+- Primitives: `docs/api/primitives.md`
 
 ## Phase-1 scope
 

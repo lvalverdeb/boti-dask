@@ -24,6 +24,7 @@ class SessionPool:
         self._persisted_collections: dict[int, list[weakref.ReferenceType[Any]]] = {}
         self._shared_sessions: dict[str, dict[str, Any]] = {}
         self._shared_creation_locks: dict[str, threading.Lock] = {}
+        self._primitives: dict[int, list[Any]] = {}
         self._lock = threading.RLock()
 
     # -- managed client helpers ------------------------------------------------
@@ -49,6 +50,29 @@ class SessionPool:
         with self._lock:
             self._managed_clients.pop(client_id, None)
             self._persisted_collections.pop(client_id, None)
+            self._primitives.pop(client_id, None)
+
+    # -- cluster primitives ----------------------------------------------------
+
+    def track_primitive(self, client: Any, primitive: Any) -> None:
+        """Remember a cluster primitive so close_client() releases it with the client."""
+        with self._lock:
+            self._primitives.setdefault(id(client), []).append(primitive)
+
+    def tracked_primitive_count(self, client: Any) -> int:
+        with self._lock:
+            return len(self._primitives.get(id(client), []))
+
+    def close_client(self, client: Any) -> None:
+        """Close the primitives tracked for *client*, then the client itself."""
+        with self._lock:
+            primitives = self._primitives.pop(id(client), [])
+        for primitive in primitives:
+            try:
+                primitive.close()
+            except Exception:
+                _module_log.debug("Failed to close a cluster primitive", exc_info=True)
+        client.close()
 
     def is_client_registered(self, client: Any) -> bool:
         with self._lock:
@@ -168,7 +192,7 @@ class SessionPool:
                 warnings.warn(msg, RuntimeWarning, stacklevel=3)
                 _log(logger, "warning", msg)
             try:
-                client.close()
+                self.close_client(client)
             finally:
                 self.unregister_managed_client(client)
         if cluster is not None:
