@@ -133,6 +133,19 @@ with dask_session(client=external) as session_client:
 # external.close()  # manual lifecycle
 ```
 
+## Compatibility
+
+Every push, and weekly, the compatibility-matrix workflow runs the test suite against the floor,
+locked and latest releases of Dask and boti. The floors are the oldest versions the suite passes
+on; the locked versions are what `uv.lock` resolves; latest is whatever PyPI serves that day.
+
+| Dependency | Floor | Locked | Latest |
+| --- | --- | --- | --- |
+| `dask[dataframe,distributed]` | 2026.3.0 | see `uv.lock` | weekly |
+| `boti` | 1.0.2 | 1.2.0 | weekly |
+
+Changes are recorded in `CHANGELOG.md`.
+
 ## Development
 
 ```bash
