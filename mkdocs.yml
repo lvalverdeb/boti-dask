@@ -1,0 +1,86 @@
+site_name: boti-dask
+site_description: Dask sessions, resilient execution and cluster utilities for the Boti ecosystem.
+site_url: https://lvalverdeb.github.io/boti-dask/
+repo_url: https://github.com/lvalverdeb/boti-dask
+repo_name: lvalverdeb/boti-dask
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+nav:
+  - Home: index.md
+  - Guides:
+      - Session: guides/session.md
+      - Resilience: guides/resilience.md
+      - Diagnostics: guides/diagnostics.md
+      - Primitives: guides/primitives.md
+      - Clusters: guides/clusters.md
+      - Watchdog: guides/watchdog.md
+      - Telemetry: guides/telemetry.md
+      - Upload: guides/upload.md
+  - Reference:
+      - Overview: reference/index.md
+      - session: reference/session.md
+      - session_settings: reference/session_settings.md
+      - session_helpers: reference/session_helpers.md
+      - session_pool: reference/session_pool.md
+      - resilience: reference/resilience.md
+      - resilience_ops: reference/resilience_ops.md
+      - resilience_async: reference/resilience_async.md
+      - diagnostics: reference/diagnostics.md
+      - primitives: reference/primitives.md
+      - clusters: reference/clusters.md
+      - watchdog: reference/watchdog.md
+      - telemetry: reference/telemetry.md
+      - upload: reference/upload.md
+  - Stability: stability.md
+  - Changelog: changelog.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            members_order: source
+            show_source: false
+            show_root_heading: false
+            show_if_no_docstring: true
+            filters: ["!^_"]
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path: [".", "docs"]
+      check_paths: true
+
+extra:
+  version:
+    provider: mike
+    default: latest

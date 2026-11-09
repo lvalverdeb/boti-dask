@@ -1,141 +1,79 @@
 # boti-dask
 
-Dask runtime/session/resilience utilities for the Boti ecosystem.
+Dask sessions, resilient execution and cluster utilities for the Boti ecosystem.
+`import boti_dask` takes about two milliseconds and imports no Dask until a Dask-backed name is used.
 
-## API sections
+Documentation: <https://lvalverdeb.github.io/boti-dask/> (built from `docs/` with mkdocs-material;
+`uv run mkdocs serve` renders it locally).
 
-- Session: `docs/api/session.md`
-- Resilience: `docs/api/resilience.md`
-- Diagnostics: `docs/api/diagnostics.md`
-- Clusters: `docs/api/clusters.md`
-- Watchdog: `docs/api/watchdog.md`
-- Telemetry: `docs/api/telemetry.md`
-- Upload: `docs/api/upload.md`
-- Primitives: `docs/api/primitives.md`
+## Install
 
-## Phase-1 scope
+```bash
+uv add boti-dask                 # core: boti, dask[dataframe,distributed], pandas
+uv add 'boti-dask[diagnostics]'  # numpy, polars, pyarrow for describe_frame on those engines
+uv add 'boti-dask[k8s]'          # dask-kubernetes  -> cluster_kind="kubernetes"
+uv add 'boti-dask[slurm]'        # dask-jobqueue    -> cluster_kind="slurm"
+uv add 'boti-dask[coiled]'       # coiled           -> cluster_kind="coiled"
+uv add 'boti-dask[otel]'         # OpenTelemetryProvider
+```
 
-This initial bootstrap provides:
-
-- `DaskSession` and `dask_session(...)` helpers
-- `DaskSessionSettings` and `dask_session_from_env_prefix(...)` helpers
-- shared-session lifecycle support
-- recommended Dask config profile helpers
-- resilient execution wrappers:
-  - `safe_compute`, `safe_persist`, `safe_wait`, `safe_head`, `safe_gather`
-  - async counterparts
-- diagnostics helpers:
-  - `inspect_graph`, `describe_frame`, `diagnostics_logger`
-- Dask emptiness and unique-value helpers:
-  - `dask_is_probably_empty`, `dask_is_empty`, `UniqueValuesExtractor`
-
-## Quick start
+## A verified session
 
 ```python
-from boti_dask import dask_session, inspect_graph, safe_compute
 import dask
+from boti_dask import dask_session, safe_compute
 
-with dask_session(cluster_kwargs={"n_workers": 1, "threads_per_worker": 1, "processes": False, "dashboard_address": ":0"}) as client:
-    value = dask.delayed(lambda: 6 * 7)()
-    print(safe_compute(value, dask_client=client))
-    print(inspect_graph(value))
+with dask_session(cluster_kwargs={"n_workers": 2, "processes": False}) as client:
+    print(safe_compute(dask.delayed(lambda: 6 * 7)(), dask_client=client))
 ```
 
-If `dashboard_address` is omitted for local managed sessions, `boti-dask` defaults it to `":0"`.
+Before the client is handed out the scheduler is pinged, a worker is awaited and one task runs,
+within 10 seconds by default; a dead or empty cluster raises `DaskSessionUnavailable` instead of
+hanging. Tune it with `verify_connectivity=ConnectivityCheck(timeout=..., min_workers=...)`.
 
-Every session verifies the cluster before handing out the client: a scheduler ping, at least one
-worker and a round-trip task, within 10 seconds by default. A dead or empty cluster raises
-`DaskSessionUnavailable` instead of hanging; tune it with `verify_connectivity=ConnectivityCheck(timeout=..., min_workers=...)`
-or skip it with `verify_connectivity=False`. See `docs/api/session.md`.
-
-Load session defaults from prefixed environment variables:
+## A shared session with resilient execution
 
 ```python
-from boti_dask import DaskSessionSettings, dask_session_from_env_prefix
-
-settings = DaskSessionSettings.from_env_prefix("BOTI_DASK_", env_file=".env")
-session = dask_session_from_env_prefix("BOTI_DASK_", env_file=".env", verify_connectivity=True)
-```
-
-## Distributed computing scenarios
-
-### Multi-worker cluster with grouped aggregation
-
-Launch a 4-worker cluster, distribute a DataFrame across 8 partitions, and
-run a grouped sum that executes in parallel across all workers:
-
-```python
-from boti_dask import dask_session, describe_client, safe_persist, safe_compute
 import dask.dataframe as dd, pandas as pd
+from boti_dask import dask_session, safe_persist, safe_compute
 
-with dask_session(
-    cluster_kwargs={"n_workers": 4, "threads_per_worker": 2, "processes": False, "dashboard_address": ":0"},
-) as client:
-    print(describe_client(client))  # "workers": 4, "threads": 8
-
-    ddf = dd.from_pandas(pd.DataFrame({"v": range(10_000), "g": ["X","Y","Z"] * 3334}), npartitions=8)
-    persisted = safe_persist(ddf, dask_client=client)
-    grouped = safe_compute(persisted.groupby("g")["v"].sum(), dask_client=client)
-    print(grouped)  # {"X": 16665000, "Y": 16665000, "Z": 16665000}
+kwargs = {"n_workers": 2, "threads_per_worker": 1, "processes": False}
+with dask_session(cluster_kwargs=kwargs, shared=True, shared_key="etl") as outer:
+    ddf = dd.from_pandas(pd.DataFrame({"v": range(10_000), "g": ["X", "Y"] * 5_000}), npartitions=4)
+    persisted = safe_persist(ddf, dask_client=outer)
+    with dask_session(shared=True, shared_key="etl") as inner:   # same client, ref-counted
+        print(safe_compute(persisted.groupby("g")["v"].sum(), dask_client=inner))
 ```
 
-### Shared session with nested contexts
+`safe_compute`, `safe_persist`, `safe_wait`, `safe_head` and `safe_gather` (and their
+`async_safe_*` twins) retry once on a recoverable Dask error, re-resolve the client, and turn an
+orphaned graph into a readable `RuntimeError`.
 
-Multiple ``with`` blocks share the same Dask client via reference counting.
-The client stays alive until the last holder exits:
+## Everything from one environment prefix
 
 ```python
-from boti_dask import dask_session
+from boti_dask import dask_session_from_env_prefix
 
-kwargs = {"n_workers": 2, "threads_per_worker": 1, "processes": False, "dashboard_address": ":0"}
-with dask_session(cluster_kwargs=kwargs, shared=True, shared_key="my-cluster") as outer:
-    with dask_session(shared=True, shared_key="my-cluster") as inner:
-        print(outer is inner)  # True
-    # outer still alive here
+with dask_session_from_env_prefix("ETL_DASK_", env_file=".env") as client:
+    ...
 ```
 
-### Async distributed pipeline
-
-Persist, wait, head, compute, and gather — all through async-safe wrappers:
-
-```python
-import asyncio
-from boti_dask import dask_session, async_safe_persist, async_safe_head, async_safe_gather
-import dask.dataframe as dd, pandas as pd, dask
-
-async def pipeline():
-    ddf = dd.from_pandas(pd.DataFrame({"id": range(100)}), npartitions=4)
-    with dask_session(cluster_kwargs={"n_workers": 2, "processes": False, "dashboard_address": ":0"}) as client:
-        p = await async_safe_persist(ddf, dask_client=client)
-        preview = await async_safe_head(p, n=3, dask_client=client)
-        gathered = await async_safe_gather([dask.delayed(lambda: 42)()], dask_client=client)
-        return preview["id"].tolist(), gathered
-
-asyncio.run(pipeline())
+```bash
+ETL_DASK_CLUSTER_KIND=slurm                          # or kubernetes, coiled, local
+ETL_DASK_CLUSTER_KWARGS={"queue": "batch", "cores": 8}
+ETL_DASK_WATCHDOG_INTERVAL=30                        # probe every 30 s, rebind after 3 misses
+ETL_DASK_TELEMETRY=otel                              # spans around safe_*, counters and gauges
+ETL_DASK_UPLOAD=./src/etl_jobs,rich>=13              # shipped to workers once per scheduler
 ```
 
-### Orphaned graph detection
+## Guides and reference
 
-When a Dask collection outlives the session that created it, operations
-fail with a clear error instead of a cryptic Dask traceback:
-
-```python
-with dask_session(cluster_kwargs={...}) as client:
-    persisted = safe_persist(ddf, dask_client=client)
-# session closed — persisted is now orphaned
-safe_head(persisted)  # RuntimeError: orphaned from its original client/worker state
-```
-
-Pass an external Dask `Client` to keep the client alive across session boundaries:
-
-```python
-from dask.distributed import LocalCluster, Client
-cluster = LocalCluster(...)
-external = Client(cluster)
-with dask_session(client=external) as session_client:
-    result = safe_compute(dask.delayed(lambda: 42)(), dask_client=session_client)
-# external.close()  # manual lifecycle
-```
+- Session, resilience, diagnostics and primitives: `docs/guides/`.
+- Clusters, watchdog, telemetry and upload (new in 1.2, experimental): `docs/guides/`.
+- API reference from the docstrings: `docs/reference/`.
+- Stability tiers (`boti_dask.STABLE` / `boti_dask.EXPERIMENTAL`) and deprecation: `docs/stability.md`.
+- Runnable scripts: `examples/` (`uv run python examples/smoke_all_examples.py`).
+- Changes: `CHANGELOG.md`.
 
 ## Compatibility
 
@@ -148,20 +86,11 @@ on; the locked versions are what `uv.lock` resolves; latest is whatever PyPI ser
 | `dask[dataframe,distributed]` | 2026.3.0 | see `uv.lock` | weekly |
 | `boti` | 1.0.2 | 1.2.0 | weekly |
 
-Changes are recorded in `CHANGELOG.md`.
-
 ## Development
 
 ```bash
-uv sync --dev
-uv run pytest -q
+uv sync --group dev --group docs
+make verify          # ruff + pytest, what CI runs
+make bench           # pytest-benchmark against benchmarks/baseline/local
+uv run mkdocs serve  # docs at http://127.0.0.1:8000
 ```
-
-## Examples
-
-```bash
-uv run python examples/data_facade_dask_resilience.py
-uv run python examples/smoke_all_examples.py
-```
-
-See `examples/README.md` for details.

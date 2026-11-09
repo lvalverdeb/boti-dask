@@ -1,0 +1,42 @@
+name: Docs
+
+# Publishes the mkdocs-material site to the gh-pages branch with mike on
+# every release, versioned by tag (v1.2.0 -> "1.2") and aliased "latest".
+# workflow_dispatch builds without deploying, as a check.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # mike commits to gh-pages
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --locked --group docs
+
+      - name: Build (strict)
+        run: uv run mkdocs build --strict
+
+      - name: Deploy versioned site
+        if: github.event_name == 'release'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          version="${GITHUB_REF_NAME#v}"
+          minor="${version%.*}"
+          uv run mike deploy --push --update-aliases "$minor" latest
+          uv run mike set-default --push latest
