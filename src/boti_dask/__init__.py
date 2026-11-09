@@ -28,6 +28,8 @@ _LAZY = {
     "ConnectivityCheck": ("boti_dask.session_helpers", "ConnectivityCheck"),
     "DaskSession": ("boti_dask.session", "DaskSession"),
     "DaskSessionUnavailable": ("boti_dask.session_helpers", "DaskSessionUnavailable"),
+    "Watchdog": ("boti_dask.watchdog", "Watchdog"),
+    "WatchdogConfig": ("boti_dask.watchdog", "WatchdogConfig"),
     "apply_recommended_dask_config": ("boti_dask.session", "apply_recommended_dask_config"),
     "current_client_summary": ("boti_dask.session", "current_client_summary"),
     "dask_session": ("boti_dask.session", "dask_session"),

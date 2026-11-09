@@ -15,6 +15,7 @@ _ENV_PREFIX_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*_?$")
 # settings and ConnectivityCheck (in session_helpers) read the same numbers.
 DEFAULT_CONNECTIVITY_TIMEOUT = 10.0
 DEFAULT_MIN_WORKERS = 1
+DEFAULT_WATCHDOG_FAILURES = 3
 
 
 def _validate_env_prefix(prefix: str) -> str:
@@ -83,6 +84,9 @@ class DaskSessionSettings:
     # One of boti_dask.clusters.CLUSTER_KINDS; None keeps DaskSession's default
     # (LocalCluster). Ignored when scheduler_address is set.
     cluster_kind: str | None = None
+    # A positive number of seconds turns on the watchdog (see boti_dask.watchdog).
+    watchdog_interval: float | None = None
+    watchdog_failures: int = DEFAULT_WATCHDOG_FAILURES
 
     def __post_init__(self) -> None:
         if self.cluster_kind is not None:
@@ -110,6 +114,8 @@ class DaskSessionSettings:
         cluster_kwargs_raw = merged.get(f"{normalized_prefix}CLUSTER_KWARGS")
         client_kwargs_raw = merged.get(f"{normalized_prefix}CLIENT_KWARGS")
         cluster_kind = merged.get(f"{normalized_prefix}CLUSTER_KIND")
+        watchdog_interval_raw = merged.get(f"{normalized_prefix}WATCHDOG_INTERVAL")
+        watchdog_failures_raw = merged.get(f"{normalized_prefix}WATCHDOG_FAILURES")
 
         return cls(
             scheduler_address=scheduler_address or None,
@@ -133,6 +139,16 @@ class DaskSessionSettings:
             if client_kwargs_raw is None
             else _parse_env_json_mapping(client_kwargs_raw, field_name="client_kwargs"),
             cluster_kind=cluster_kind or None,
+            watchdog_interval=None
+            if watchdog_interval_raw is None
+            else _parse_env_number(
+                watchdog_interval_raw, field_name="watchdog_interval", kind=float
+            ),
+            watchdog_failures=DEFAULT_WATCHDOG_FAILURES
+            if watchdog_failures_raw is None
+            else int(
+                _parse_env_number(watchdog_failures_raw, field_name="watchdog_failures", kind=int)
+            ),
         )
 
     def to_session_kwargs(self) -> dict[str, Any]:
@@ -156,4 +172,10 @@ class DaskSessionSettings:
             from .clusters import cluster_factory
 
             payload["cluster_factory"] = cluster_factory(self.cluster_kind)
+        if self.watchdog_interval is not None:
+            from .watchdog import WatchdogConfig
+
+            payload["watchdog"] = WatchdogConfig(
+                interval=self.watchdog_interval, failures_before_rebind=self.watchdog_failures
+            )
         return payload

@@ -25,7 +25,19 @@ class SessionPool:
         self._shared_sessions: dict[str, dict[str, Any]] = {}
         self._shared_creation_locks: dict[str, threading.Lock] = {}
         self._primitives: dict[int, list[Any]] = {}
+        self._rebinds = 0
         self._lock = threading.RLock()
+
+    # -- rebinds ---------------------------------------------------------------
+
+    def record_rebind(self) -> None:
+        with self._lock:
+            self._rebinds += 1
+
+    def rebind_count(self) -> int:
+        """Rebinds performed by any session in this process (watchdog or explicit)."""
+        with self._lock:
+            return self._rebinds
 
     # -- managed client helpers ------------------------------------------------
 
@@ -139,6 +151,20 @@ class SessionPool:
                 "ref_count": 1,
             }
 
+    def detach_shared_session(self, key: str) -> dict[str, Any] | None:
+        """Remove and return the entry for *key* (with its ``ref_count``) without closing it.
+
+        Used by :meth:`DaskSession.rebind`, which closes the old client itself
+        and registers the replacement under the same key and holder count.
+        """
+        with self._lock:
+            return self._shared_sessions.pop(key, None)
+
+    def set_shared_ref_count(self, key: str, count: int) -> None:
+        with self._lock:
+            if key in self._shared_sessions:
+                self._shared_sessions[key]["ref_count"] = count
+
     def get_shared_session(self, key: str) -> dict[str, Any] | None:
         with self._lock:
             entry = self._shared_sessions.get(key)
@@ -199,11 +225,6 @@ class SessionPool:
             cluster.close()
 
     # -- testing helpers -------------------------------------------------------
-
-    def debug_set_shared_ref_count(self, key: str, count: int) -> None:
-        with self._lock:
-            if key in self._shared_sessions:
-                self._shared_sessions[key]["ref_count"] = count
 
     def debug_shared_session_keys(self) -> list[str]:
         with self._lock:

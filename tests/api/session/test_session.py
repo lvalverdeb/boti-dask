@@ -87,7 +87,7 @@ def test_release_shared_session_is_safe_under_concurrent_release_calls():
     cluster = _CloseSpy()
 
     session_module.pool.register_shared_session(key, client=client, cluster=cluster)
-    session_module.pool.debug_set_shared_ref_count(key, 8)
+    session_module.pool.set_shared_ref_count(key, 8)
 
     def release_once() -> None:
         session_module.pool.release_shared_session(key)

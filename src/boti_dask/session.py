@@ -28,13 +28,13 @@ from .session_helpers import (
     recommended_dask_config,
 )
 from .session_pool import SessionPool, pool
+from .session_rebind import SessionRebindMixin
 from .session_settings import DaskSessionSettings
+from .watchdog import WatchdogConfig
 
-# Module-level fallback for free functions with no caller-supplied logger.
-# Debug level only — these are expected/best-effort paths. Kept here (rather
-# than in session_helpers.py) because describe_client/current_client_summary
-# are covered by tests that scope caplog to the "boti_dask.session" logger
-# name specifically, and get_client is monkeypatched via this module.
+# Module-level fallback for free functions with no caller-supplied logger
+# (debug level only). Kept here because tests scope caplog to the
+# "boti_dask.session" logger and monkeypatch get_client via this module.
 _module_log = logging.getLogger(__name__)
 
 
@@ -73,7 +73,7 @@ def current_client_summary() -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-class DaskSession(ManagedResource):
+class DaskSession(SessionRebindMixin, ManagedResource):
     """A Dask distributed session backed by a :class:`ManagedResource` lifecycle.
 
     Accepts an existing client, connects to a scheduler address, or creates a
@@ -85,6 +85,11 @@ class DaskSession(ManagedResource):
     run, all within :class:`ConnectivityCheck.timeout` (10 s). Pass ``False`` to
     skip, or a :class:`ConnectivityCheck` to change the deadline or worker count.
     A failed check raises :class:`DaskSessionUnavailable` instead of hanging.
+
+    ``watchdog`` (a :class:`WatchdogConfig`) keeps probing the client on a
+    daemon thread after open and calls :meth:`rebind` once the configured number
+    of consecutive probes fail. It applies to clients the session creates, not
+    to an externally supplied ``client``.
     """
 
     def __init__(
@@ -98,6 +103,7 @@ class DaskSession(ManagedResource):
         shared: bool = False,
         shared_key: str | None = None,
         verify_connectivity: bool | ConnectivityCheck = True,
+        watchdog: WatchdogConfig | None = None,
         config: ResourceConfig | None = None,
         verbose: bool = False,
         debug: bool = False,
@@ -123,8 +129,10 @@ class DaskSession(ManagedResource):
         self.shared = shared
         self.shared_key = shared_key
         self.connectivity: ConnectivityCheck | None = _resolve_connectivity(verify_connectivity)
+        self.watchdog_config = watchdog
 
         # Runtime state
+        self._watchdog = None
         self._cluster: Any | None = None
         self._owns_client: bool = False
         self._owns_cluster: bool = False
@@ -186,8 +194,11 @@ class DaskSession(ManagedResource):
             # cluster, and the second register overwrites the first pool
             # entry — leaking a cluster and corrupting the ref count.
             with pool.shared_creation_lock(self._shared_key()):
-                return self._open_connection()
-        return self._open_connection()
+                client = self._open_connection()
+        else:
+            client = self._open_connection()
+        self._start_watchdog()
+        return client
 
     def _open_connection(self) -> Any:
         if self.shared:
@@ -285,6 +296,7 @@ class DaskSession(ManagedResource):
 
     def _cleanup(self) -> None:
         """Release Dask resources. Called by :meth:`ManagedResource.close`."""
+        self._stop_watchdog()
 
         # Shared session: decrement ref count; only close when it hits zero.
         if self._shared_session_key is not None and self.client is not None:
@@ -298,7 +310,10 @@ class DaskSession(ManagedResource):
                 self._owns_cluster = False
             return
 
-        # Managed session: close client + cluster.
+        self._release_managed_connection()
+
+    def _release_managed_connection(self) -> None:
+        """Close an owned client and cluster, warning about live persisted collections."""
         try:
             if self._owns_client and self.client is not None:
                 live = pool.live_persisted_collection_count(self.client)
@@ -373,6 +388,7 @@ __all__ = [
     "DaskSessionSettings",
     "DaskSessionUnavailable",
     "SessionPool",
+    "WatchdogConfig",
     "apply_recommended_dask_config",
     "current_client_summary",
     "dask_session",

@@ -14,6 +14,7 @@
 - `current_client_summary()`
 - `ConnectivityCheck`
 - `DaskSessionUnavailable`
+- `WatchdogConfig` (see `watchdog.md`)
 
 ## Typical usage
 
@@ -61,5 +62,7 @@ and `{PREFIX}MIN_WORKERS`.
   it defaults to `":0"` to avoid port `8787` contention.
 - `DaskSessionSettings.from_env_prefix(...)` supports typed env-backed loading for
   `scheduler_address`, `shared`, `shared_key`, `verify_connectivity`,
-  `connectivity_timeout`, `min_workers`, `cluster_kwargs` (JSON), and `client_kwargs` (JSON).
+  `connectivity_timeout`, `min_workers`, `cluster_kwargs` (JSON), `client_kwargs` (JSON),
+  `cluster_kind`, `watchdog_interval` and `watchdog_failures`.
+- `DaskSession.rebind()` replaces a dead client with a fresh connection; the watchdog calls it.
 
