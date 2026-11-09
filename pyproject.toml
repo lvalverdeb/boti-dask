@@ -1,6 +1,6 @@
 [project]
 name = "boti-dask"
-version = "1.1.0"
+version = "1.2.0"
 description = "Dask runtime and resilience utilities for the Boti ecosystem"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -27,11 +27,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-extra = [
+# Engines describe_frame / UniqueValuesExtractor can describe beyond pandas.
+diagnostics = [
     "numpy>=2.3.0,<3.0.0",
     "polars>=1.29.0,<2.0.0",
     "pyarrow>=23.0.1,<24.0.0",
 ]
+# Former name of the diagnostics extra; kept so existing installs keep resolving.
+extra = ["boti-dask[diagnostics]"]
 # Cluster backends for boti_dask.clusters / DaskSessionSettings.cluster_kind.
 k8s = ["dask-kubernetes>=2025.1.0,<2027.0.0"]
 slurm = ["dask-jobqueue>=0.9.0,<1.0.0"]

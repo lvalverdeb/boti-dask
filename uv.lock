@@ -309,7 +309,7 @@ wheels = [
 
 [[package]]
 name = "boti-dask"
-version = "1.1.0"
+version = "1.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "boti" },
@@ -320,6 +320,11 @@ dependencies = [
 [package.optional-dependencies]
 coiled = [
     { name = "coiled" },
+]
+diagnostics = [
+    { name = "numpy" },
+    { name = "polars" },
+    { name = "pyarrow" },
 ]
 extra = [
     { name = "numpy" },
@@ -353,18 +358,19 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "boti", specifier = ">=1.0.2,<2.0.0" },
+    { name = "boti-dask", extras = ["diagnostics"], marker = "extra == 'extra'" },
     { name = "coiled", marker = "extra == 'coiled'", specifier = ">=1.0.0,<2.0.0" },
     { name = "dask", extras = ["dataframe", "distributed"], specifier = ">=2026.3.0,<2027.0.0" },
     { name = "dask-jobqueue", marker = "extra == 'slurm'", specifier = ">=0.9.0,<1.0.0" },
     { name = "dask-kubernetes", marker = "extra == 'k8s'", specifier = ">=2025.1.0,<2027.0.0" },
-    { name = "numpy", marker = "extra == 'extra'", specifier = ">=2.3.0,<3.0.0" },
+    { name = "numpy", marker = "extra == 'diagnostics'", specifier = ">=2.3.0,<3.0.0" },
     { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.30.0,<2.0.0" },
     { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.30.0,<2.0.0" },
     { name = "pandas", specifier = ">=3.0.2,<4.0.0" },
-    { name = "polars", marker = "extra == 'extra'", specifier = ">=1.29.0,<2.0.0" },
-    { name = "pyarrow", marker = "extra == 'extra'", specifier = ">=23.0.1,<24.0.0" },
+    { name = "polars", marker = "extra == 'diagnostics'", specifier = ">=1.29.0,<2.0.0" },
+    { name = "pyarrow", marker = "extra == 'diagnostics'", specifier = ">=23.0.1,<24.0.0" },
 ]
-provides-extras = ["extra", "k8s", "slurm", "coiled", "otel"]
+provides-extras = ["diagnostics", "extra", "k8s", "slurm", "coiled", "otel"]
 
 [package.metadata.requires-dev]
 dev = [

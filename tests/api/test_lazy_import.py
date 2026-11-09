@@ -57,6 +57,7 @@ def test_every_exported_name_resolves_and_is_listed_by_dir():
     for name in boti_dask.__all__:
         assert name in listed
         assert getattr(boti_dask, name) is not None
+    assert "STABLE" in listed and "deprecated" in listed
 
 
 def test_unknown_name_raises_attribute_error():

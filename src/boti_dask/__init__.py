@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import warnings
 from typing import Any
 
 # Every public name is loaded lazily (PEP 562), mirroring boti_data: importing
@@ -60,7 +61,34 @@ _LAZY = {
     "safe_wait": ("boti_dask.resilience_ops", "safe_wait"),
 }
 
-__all__ = sorted(_LAZY)
+# Stability tiers. Stable names change only with a major version, after a
+# minor version in which the old form warns through deprecated(). Experimental
+# names (new in 1.2) may change in a minor version; the changelog records it.
+EXPERIMENTAL: tuple[str, ...] = (
+    "CLUSTER_KINDS",
+    "cluster_factory",
+    "make_cluster",
+    "Watchdog",
+    "WatchdogConfig",
+    "InMemoryProvider",
+    "NoopProvider",
+    "OpenTelemetryProvider",
+    "TelemetryProvider",
+    "configure_telemetry",
+    "get_telemetry",
+    "sync_uploads",
+)
+STABLE: tuple[str, ...] = tuple(sorted(set(_LAZY) - set(EXPERIMENTAL)))
+
+__all__ = sorted(_LAZY) + ["EXPERIMENTAL", "STABLE", "deprecated"]
+
+
+def deprecated(name: str, removal: str, *, replacement: str | None = None) -> None:
+    """Warn that *name* goes away in boti-dask *removal*; point at *replacement* if any."""
+    message = f"{name} is deprecated and will be removed in boti-dask {removal}."
+    if replacement:
+        message += f" Use {replacement} instead."
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
 
 
 def __getattr__(name: str) -> Any:

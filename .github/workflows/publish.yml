@@ -20,7 +20,7 @@ jobs:
         run: uv sync --group dev
 
       - name: Run ruff check
-        run: uv run ruff check src/ tests/
+        run: uv run ruff check src/ tests/ benchmarks/
 
       - name: Run tests
         run: uv run pytest tests/ --tb=short -q

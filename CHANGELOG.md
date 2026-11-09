@@ -7,6 +7,23 @@ under *Changed*.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-09
+
+### Added
+- `boti_dask.clusters`: `cluster_factory(kind)`, `make_cluster(kind, **kwargs)` and `CLUSTER_KINDS` select `local`, `kubernetes` (`dask-kubernetes`), `slurm` (`dask-jobqueue`) or `coiled` by name, importing the backend on first use. A missing backend raises `ModuleNotFoundError` naming the extra (`k8s`, `slurm`, `coiled`). `DaskSessionSettings.cluster_kind` / `{PREFIX}CLUSTER_KIND` maps to `cluster_factory`.
+- `boti_dask.watchdog`: `WatchdogConfig` and `Watchdog` probe the client on a daemon thread after open and call the new `DaskSession.rebind()` after `failures_before_rebind` consecutive failures. A managed session reopens; a shared session swaps the pool entry keeping its holders. Events reach the logger and an `on_event` callback; `SessionPool.rebind_count()` counts rebinds. `DaskSession(watchdog=...)`, `{PREFIX}WATCHDOG_INTERVAL`, `{PREFIX}WATCHDOG_FAILURES`.
+- `boti_dask.telemetry`: `TelemetryProvider` protocol with `NoopProvider` (default), `InMemoryProvider` and `OpenTelemetryProvider` (`otel` extra). Spans around every `safe_*` and `async_safe_*` call; counters `retries`, `rebinds`, `recoverable_errors`; gauges `workers`, `task_count`, `persisted_collections` from `DaskSession.record_gauges()`. `DaskSession(telemetry=...)`, `configure_telemetry()`, `{PREFIX}TELEMETRY=none|memory|otel`.
+- `boti_dask.upload`: `DaskSession(upload=[...])` / `{PREFIX}UPLOAD` ships `.py`/`.zip`/`.egg` files, deterministically zipped directories, pure-Python wheels and pip requirement strings to the workers on open and after a rebind, skipping payloads whose SHA-256 the scheduler dataset `boti-dask:uploads` already holds. `sync_uploads(client, items)` does the same for any client.
+- `boti_dask.STABLE` and `boti_dask.EXPERIMENTAL` name each export's tier, and `boti_dask.deprecated(name, removal, replacement=...)` emits the `DeprecationWarning` used for transitions. The four modules above are experimental in 1.2.
+- A pytest-benchmark suite (`benchmarks/`, `make bench`) with a local baseline and a Benchmarks workflow; `safe_compute` adds about 2% to a bare `client.compute` locally.
+- A mkdocs-material site (`docs/`, `uv run mkdocs serve`) with an mkdocstrings reference, deployed per minor version by mike on release.
+
+### Changed
+- **The `extra` optional dependency is now `diagnostics`**; `boti-dask[extra]` still resolves, as an alias of `boti-dask[diagnostics]`.
+- `DaskSession.__init__` accepts `watchdog`, `telemetry` and `upload`; existing arguments are unchanged.
+- `SessionPool.debug_set_shared_ref_count` is `set_shared_ref_count`.
+- The README is shorter; guides live in `docs/guides/` and the reference in `docs/reference/`.
+
 ## [1.1.0] - 2026-11-09
 
 ### Added
@@ -24,6 +41,7 @@ under *Changed*.
 
 Last release before this changelog; see the git history.
 
-[Unreleased]: https://github.com/lvalverdeb/boti-dask/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/lvalverdeb/boti-dask/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/lvalverdeb/boti-dask/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/lvalverdeb/boti-dask/compare/v1.0.7...v1.1.0
 [1.0.7]: https://github.com/lvalverdeb/boti-dask/releases/tag/v1.0.7
