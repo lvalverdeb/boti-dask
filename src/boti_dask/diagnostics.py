@@ -2,24 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import dask.dataframe as dd
-import pandas as pd
+from ._internal import _loaded, _log
 
-try:
-    import pyarrow as pa
-except ImportError:
-    pa = None
-
-try:
-    import polars as pl
-except ImportError:
-    pl = None
-
-from boti.core.logger import Logger
-
-from ._internal import _log
+if TYPE_CHECKING:
+    import dask.dataframe as dd
 
 
 def _has_dask_graph(obj: Any) -> bool:
@@ -86,12 +74,23 @@ def _describe_polars_frame(frame: Any) -> dict[str, Any]:
     }
 
 
+def _is_instance_from(module_name: str, class_name: str) -> Callable[[Any], bool]:
+    """Predicate that is true only if *module_name* is already imported and the
+    object is an instance of its *class_name* -- so no engine is imported here."""
+
+    def predicate(frame: Any) -> bool:
+        module = _loaded(module_name)
+        return module is not None and isinstance(frame, getattr(module, class_name))
+
+    return predicate
+
+
 # Ordered like the isinstance chain they replace: first matching predicate wins.
 _FRAME_ENGINE_HANDLERS: list[tuple[Callable[[Any], bool], Callable[[Any], dict[str, Any]]]] = [
-    (lambda frame: isinstance(frame, dd.DataFrame), _describe_dask_frame),
-    (lambda frame: isinstance(frame, pd.DataFrame), _describe_pandas_frame),
-    (lambda frame: pa is not None and isinstance(frame, pa.Table), _describe_arrow_table),
-    (lambda frame: pl is not None and isinstance(frame, pl.DataFrame), _describe_polars_frame),
+    (_is_instance_from("dask.dataframe", "DataFrame"), _describe_dask_frame),
+    (_is_instance_from("pandas", "DataFrame"), _describe_pandas_frame),
+    (_is_instance_from("pyarrow", "Table"), _describe_arrow_table),
+    (_is_instance_from("polars", "DataFrame"), _describe_polars_frame),
 ]
 
 
@@ -107,6 +106,8 @@ def diagnostics_logger(logger: Any | None, *, name: str) -> Any:
     """Return provided logger or a :class:`boti.Logger` fallback scoped by *name*."""
     if logger is not None:
         return logger
+    from boti.core.logger import Logger
+
     return Logger.default_logger(logger_name=name)
 
 
@@ -129,6 +130,8 @@ class UniqueValuesExtractor:
             values = safe_compute(expression, dask_client=self.dask_client, logger=self.logger)
         else:
             values = expression.compute(scheduler="threads")
+        import pandas as pd
+
         as_series = pd.Series(values)
         unique_values = as_series.dropna().unique().tolist()
         if len(unique_values) > limit:
