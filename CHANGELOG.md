@@ -9,6 +9,29 @@ under *Changed*.
 
 ### Security
 
+- **`{PREFIX}UPLOAD` keeps extras and version ranges in one entry.** The value
+  was split on every comma, so `pkg[a,b]>=1,<2` became four entries. Commas
+  inside brackets or followed by a version operator (`<`, `>`, `=`, `!`, `~`)
+  no longer split; a value starting with `[` is read as a JSON list of strings.
+  `./src/etl_jobs,rich>=13` parses as before.
+- **A directory upload is resolved before it is zipped.** `.` or `..` has no
+  name of its own, so the archive held entries with a leading slash that no
+  worker could import; the resolved directory's name is used instead, and the
+  filesystem root is refused with a `ValueError`.
+- **Derived shared keys, upload paths and settings kwargs stay out of logs and
+  the scheduler dataset.** The `Reusing shared Dask session` and `Rebound Dask
+  session` lines log the session `namespace` (the explicit `shared_key`, or a
+  digest of the derived key, which embeds `repr(client_kwargs)`) rather than
+  the key text. Entries of the `boti-dask:uploads` dataset, readable by every
+  client of the scheduler, are now `kind:basename@digest` rather than the
+  local absolute path; the session log still names the full source.
+  `repr(DaskSessionSettings)` shows the key names of `cluster_kwargs` and
+  `client_kwargs` but not their values.
+- **`safe_*` inspect the graph only when their logger is enabled for `DEBUG`.**
+  `inspect_graph` materialises the whole graph, and the wrappers ran it on every
+  call (dry runs included) to log a line at `INFO`. They now skip it unless the
+  logger would emit `DEBUG`, and log at that level; `inspect_graph` gains a
+  `level` keyword (default `"info"`) for direct use.
 - **`{PREFIX}CLUSTER_KWARGS` accepts only sizing, placement and naming keys**
   (`ENV_CLUSTER_KWARGS`). Dask cluster classes also take keys that load code
   at start-up (`preload`, `worker_class`, `security`, job-script prologues),

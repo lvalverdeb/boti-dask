@@ -34,6 +34,7 @@ _LOADABLE_SUFFIXES = frozenset({".py", ".zip", ".egg", ".pyz"})
 _SKIPPED_PARTS = frozenset({"__pycache__", ".git", ".pytest_cache", ".mypy_cache"})
 _EPOCH = (1980, 1, 1, 0, 0, 0)  # zip's earliest timestamp, fixed for reproducible bytes
 _PLUGIN_NAME_DIGEST_CHARS = 16
+_LABEL_DIGEST_CHARS = 12
 
 
 class PayloadKind(StrEnum):
@@ -53,6 +54,17 @@ class Payload:
 
     @property
     def label(self) -> str:
+        """What the scheduler dataset records: kind, base name and a short digest.
+
+        The dataset is readable by every client of the scheduler, so a path
+        payload is labelled by its base name alone, never its directory.
+        """
+        name = self.source if self.kind is PayloadKind.REQUIREMENT else Path(self.source).name
+        return f"{self.kind.value}:{name}@{self.digest[:_LABEL_DIGEST_CHARS]}"
+
+    @property
+    def description(self) -> str:
+        """Kind and full source, for the local log only."""
         return f"{self.kind.value}:{self.source}"
 
 
@@ -78,8 +90,23 @@ def _directory_files(root: Path) -> Iterator[Path]:
             yield path
 
 
+def _resolved_directory(root: Path) -> Path:
+    """*root* made absolute, so ``.`` or ``..`` still has a name to ship under.
+
+    The filesystem root has no name at all: an archive built from it would
+    hold entries with a leading slash that no worker can import.
+    """
+    resolved = root.expanduser().resolve()
+    if not resolved.name:
+        raise ValueError(
+            f"Cannot upload {root}: the filesystem root has no directory name to ship under."
+        )
+    return resolved
+
+
 def _zip_directory(root: Path, target: Path) -> None:
     """Zip *root* as ``root.name/...`` with sorted entries and fixed timestamps."""
+    root = _resolved_directory(root)
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in _directory_files(root):
             info = zipfile.ZipInfo(f"{root.name}/{path.relative_to(root).as_posix()}", _EPOCH)
@@ -120,12 +147,17 @@ def _requirement_payload(text: str) -> Payload:
     return Payload(PayloadKind.REQUIREMENT, text, hashlib.sha256(text.encode()).hexdigest())
 
 
+def _directory_payload(path: Path) -> Payload:
+    path = _resolved_directory(path)
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / f"{path.name}.zip"
+        _zip_directory(path, target)
+        return Payload(PayloadKind.DIRECTORY, str(path), _file_digest(target))
+
+
 def _path_payload(path: Path) -> Payload:
     if path.is_dir():
-        with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / f"{path.name}.zip"
-            _zip_directory(path, target)
-            return Payload(PayloadKind.DIRECTORY, str(path), _file_digest(target))
+        return _directory_payload(path)
     kind = PayloadKind.WHEEL if path.suffix == ".whl" else PayloadKind.FILE
     if kind is PayloadKind.FILE and path.suffix not in _LOADABLE_SUFFIXES:
         raise ValueError(
@@ -213,6 +245,6 @@ def sync_uploads(
         logger,
         "info",
         f"Uploaded {len(pending)} payload(s) to the cluster: "
-        + ", ".join(payload.label for payload in pending),
+        + ", ".join(payload.description for payload in pending),
     )
     return pending

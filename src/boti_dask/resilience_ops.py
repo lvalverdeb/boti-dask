@@ -10,6 +10,7 @@ module docstring-equivalent comment on _module_log for why.
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
@@ -165,6 +166,14 @@ def _handle_recoverable_dask_error(
     return ctx.local_op(ctx.obj)
 
 
+def _debug_enabled(logger: Any | None) -> bool:
+    """True when *logger* would emit DEBUG; a logger without ``isEnabledFor`` counts as yes."""
+    if logger is None:
+        return False
+    is_enabled_for = getattr(logger, "isEnabledFor", None)
+    return not callable(is_enabled_for) or bool(is_enabled_for(logging.DEBUG))
+
+
 def _require_client_if_given(operation_name: str, given: Any | None, active: Any | None) -> None:
     """A caller who passed a client asked for the cluster: never run locally in its place."""
     if given is not None and active is None:
@@ -186,8 +195,10 @@ def _execute_sync(
     dry_run: bool = False,
     timeout: float | None = None,
 ) -> Any:
-    if _is_dask_collection(obj):
-        inspect_graph(obj, logger=logger)
+    if _is_dask_collection(obj) and _debug_enabled(logger):
+        # Materialising the graph is O(tasks); only pay for it when the
+        # metrics line would be emitted.
+        inspect_graph(obj, logger=logger, level="debug")
     if dry_run:
         _log(logger, "info", f"{operation_name}: dry run requested; execution skipped.")
         return None

@@ -41,6 +41,10 @@ it as the `rebinds` counter.
 
 ## Events
 
+The `Rebound Dask session key=...` line names a shared session by its `namespace`: the
+explicit `shared_key`, or a digest of the derived pool key (which embeds the cluster and client
+keyword arguments and is never logged in full); `None` for a managed session.
+
 Every transition goes to the session logger and to `on_event` as a dict with `event` and
 `shared_key` plus event-specific fields (`failures`, `error`, `rebinds`). Exceptions raised by
 `on_event` are swallowed and logged at debug level; they never stop the watchdog.

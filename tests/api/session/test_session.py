@@ -308,3 +308,59 @@ def test_prepare_cluster_kwargs_preserves_explicit_dashboard_address():
 
     assert explicit["dashboard_address"] == ":8789"
     assert explicit_none["dashboard_address"] is None
+
+
+def test_derived_shared_key_is_logged_as_a_digest_not_as_kwargs(monkeypatch, caplog):
+    """A derived pool key embeds repr(client_kwargs); log lines carry only its digest."""
+
+    class StubCluster:
+        def close(self) -> None:
+            pass
+
+    class StubClient:
+        def __init__(self, cluster, **_kwargs) -> None:
+            self.cluster = cluster
+            self.status = "running"
+
+        def close(self) -> None:
+            self.status = "closed"
+
+    monkeypatch.setattr(session_module, "Client", StubClient)
+    logger = logging.getLogger("boti_dask.tests.shared_key")
+    secret = "hunter2-token"
+    kwargs = dict(
+        shared=True,
+        cluster_factory=StubCluster,
+        client_kwargs={"security": secret},
+        verify_connectivity=False,
+        logger=logger,
+    )
+    first = DaskSession(**kwargs)
+    second = DaskSession(**kwargs)
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        first.open()
+        try:
+            second.open()
+        finally:
+            second.close()
+            first.close()
+
+    reuse = [r for r in caplog.records if "Reusing shared Dask session" in r.getMessage()]
+    assert len(reuse) == 1
+    message = reuse[0].getMessage()
+    assert f"key={second.namespace!r}" in message and len(second.namespace) == 16
+    assert secret not in message and "client_kwargs" not in message
+    assert all(secret not in r.getMessage() for r in caplog.records)
+
+
+def test_dask_session_settings_repr_elides_kwargs_values():
+    settings = DaskSessionSettings(
+        scheduler_address="tcp://scheduler:8786",
+        cluster_kwargs={"n_workers": 2, "name": "etl"},
+        client_kwargs={"security": "hunter2-token"},
+    )
+    text = repr(settings)
+    assert "hunter2-token" not in text and "'etl'" not in text
+    assert "cluster_kwargs={'n_workers': ..., 'name': ...}" in text
+    assert "client_kwargs={'security': ...}" in text
+    assert "scheduler_address='tcp://scheduler:8786'" in text

@@ -237,7 +237,7 @@ class DaskSession(SessionRebindMixin, ManagedResource):
         self._verify_or_abort(client)
         if self.logger is not None:
             self.logger.info(
-                "Reusing shared Dask session %s key=%r", describe_client(client), session_key
+                "Reusing shared Dask session %s key=%r", describe_client(client), self.namespace
             )
         return client
 

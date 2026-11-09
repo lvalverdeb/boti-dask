@@ -215,3 +215,26 @@ def test_safe_compute_does_not_fall_back_locally_after_losing_the_client(monkeyp
     delayed_value = dask.delayed(lambda: 1)()
     with pytest.raises(RuntimeError, match="client was lost.*not falling back to local compute"):
         safe_compute(delayed_value, dask_client=_LosingClient())
+
+
+def test_safe_compute_inspects_the_graph_only_when_debug_is_enabled(monkeypatch):
+    """Graph inspection materialises the whole graph: skipped unless its line would be logged."""
+    calls: list[dict] = []
+
+    def recording_inspect_graph(obj, *, logger=None, level="info"):
+        calls.append({"logger": logger, "level": level})
+        return inspect_graph(obj, logger=logger, level=level)
+
+    monkeypatch.setattr(resilience_ops_module, "inspect_graph", recording_inspect_graph)
+    logger = logging.getLogger("boti_dask.tests.inspect_graph")
+    delayed_value = dask.delayed(lambda: 1)()
+
+    logger.setLevel(logging.INFO)
+    assert safe_compute(delayed_value, logger=logger) == 1
+    assert safe_compute(delayed_value, logger=logger, dry_run=True) is None
+    assert safe_compute(delayed_value) == 1
+    assert calls == []
+
+    logger.setLevel(logging.DEBUG)
+    assert safe_compute(delayed_value, logger=logger) == 1
+    assert calls == [{"logger": logger, "level": "debug"}]

@@ -61,7 +61,8 @@ def test_uploaded_directory_is_importable_on_a_worker(package_dir):
     with dask_session(cluster_kwargs=_LOCAL, upload=[package_dir]) as client:
         assert client.submit(_import_probe_answer, pure=False).result(timeout=30) == 42
         registry = client.get_dataset(UPLOAD_DATASET)
-        assert list(registry.values()) == [f"directory:{package_dir}"]
+        ((digest, label),) = registry.items()
+        assert label == f"directory:boti_upload_probe@{digest[:12]}"
 
 
 class StubClient:
@@ -189,3 +190,64 @@ def test_symlinks_inside_an_upload_directory_are_not_shipped(package_dir, tmp_pa
 
     sync_uploads(ArchiveReadingClient({}), [package_dir])
     assert archived == [["boti_upload_probe/__init__.py", "boti_upload_probe/real.py"]]
+
+
+def test_settings_upload_list_keeps_extras_and_version_ranges(monkeypatch):
+    """Commas inside brackets or before a version operator stay inside one entry."""
+    monkeypatch.setenv(
+        "DASK_SESSION_UPLOAD", "pkg[a,b]>=1,<2, ./src/etl_jobs,rich>=13, other~=2.0,!=2.1"
+    )
+    settings = DaskSessionSettings.from_env_prefix("DASK_SESSION_")
+    assert settings.upload == ["pkg[a,b]>=1,<2", "./src/etl_jobs", "rich>=13", "other~=2.0,!=2.1"]
+
+
+def test_settings_upload_accepts_a_json_list(monkeypatch):
+    monkeypatch.setenv("DASK_SESSION_UPLOAD", '["pkg[a,b]>=1,<2", " ./src/etl_jobs ", "rich>=13"]')
+    settings = DaskSessionSettings.from_env_prefix("DASK_SESSION_")
+    assert settings.upload == ["pkg[a,b]>=1,<2", "./src/etl_jobs", "rich>=13"]
+    monkeypatch.setenv("DASK_SESSION_UPLOAD", '["ok", 1]')
+    with pytest.raises(ValueError, match="JSON list of strings"):
+        DaskSessionSettings.from_env_prefix("DASK_SESSION_")
+    monkeypatch.setenv("DASK_SESSION_UPLOAD", "[not json")
+    with pytest.raises(ValueError, match="Invalid JSON value"):
+        DaskSessionSettings.from_env_prefix("DASK_SESSION_")
+
+
+def test_a_dot_directory_ships_under_its_resolved_name(package_dir, monkeypatch):
+    """``.`` has no name of its own; the archive must use the resolved directory's."""
+    monkeypatch.chdir(package_dir)
+    payload = classify_payload(".")
+    assert payload.kind is PayloadKind.DIRECTORY
+    assert payload.source == str(package_dir.resolve())
+    assert payload.digest == classify_payload(package_dir).digest
+
+    archived: list[list[str]] = []
+
+    class ArchiveReadingClient(StubClient):
+        def upload_file(self, filename, load=True):
+            with zipfile.ZipFile(filename) as archive:
+                archived.append(sorted(archive.namelist()))
+
+    sync_uploads(ArchiveReadingClient({}), ["."])
+    assert archived == [["boti_upload_probe/__init__.py"]]
+    assert not any(name.startswith("/") for name in archived[0])
+    with pytest.raises(ValueError, match="filesystem root"):
+        classify_payload("/")
+
+
+def test_dataset_labels_hold_no_directory_components(package_dir, tmp_path):
+    """The dataset is readable by every client of the scheduler: base names only."""
+    datasets: dict = {}
+    script = tmp_path / "helper.py"
+    script.write_text("z = 3\n")
+    sent = sync_uploads(StubClient(datasets), [package_dir, script, "rich>=13"])
+    labels = datasets[UPLOAD_DATASET]
+    assert set(labels) == {payload.digest for payload in sent}
+    for digest, label in labels.items():
+        kind, _, rest = label.partition(":")
+        assert "/" not in rest and str(tmp_path) not in label
+        assert rest.endswith("@" + digest[:12])
+    assert sorted(labels.values()) == sorted(
+        f"{p.kind.value}:{name}@{p.digest[:12]}"
+        for p, name in zip(sent, ["boti_upload_probe", "helper.py", "rich>=13"])
+    )

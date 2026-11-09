@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -107,11 +107,59 @@ def _parse_env_json_mapping(raw: str, *, field_name: str) -> dict[str, Any]:
     return dict(parsed)
 
 
-def _parse_env_list(raw: str | None) -> list[str]:
-    """Comma-separated entries, blanks dropped (``{PREFIX}UPLOAD``)."""
+_VERSION_OPERATOR_CHARS = frozenset("<>=!~")
+
+
+def _continues_version_spec(raw: str, start: int) -> bool:
+    """True when the text after a comma opens another version clause (``>=1,<2``)."""
+    rest = raw[start:].lstrip()
+    return bool(rest) and rest[0] in _VERSION_OPERATOR_CHARS
+
+
+def _split_env_list(raw: str) -> list[str]:
+    """Split on commas outside brackets that do not continue a version specifier."""
+    entries: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for index, char in enumerate(raw):
+        if char in "[(":
+            depth += 1
+        elif char in "])":
+            depth = max(depth - 1, 0)
+        if char == "," and depth == 0 and not _continues_version_spec(raw, index + 1):
+            entries.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    entries.append("".join(current))
+    return [entry.strip() for entry in entries if entry.strip()]
+
+
+def _parse_env_json_list(raw: str, *, field_name: str) -> list[str]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid JSON value for {field_name!r}: {raw!r}. Provide a JSON list of strings."
+        ) from exc
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+        raise ValueError(f"Invalid value for {field_name!r}: expected a JSON list of strings.")
+    return [item.strip() for item in parsed if item.strip()]
+
+
+def _parse_env_list(raw: str | None, *, field_name: str = "upload") -> list[str]:
+    """Entries of ``{PREFIX}UPLOAD``: a JSON list, or comma-separated text.
+
+    A comma inside brackets (``pkg[a,b]``) or one followed by a version
+    operator (``>=1,<2``) stays inside its entry, so a requirement with
+    extras or a version range is one entry rather than several.
+    """
     if raw is None:
         return []
-    return [item.strip() for item in raw.split(",") if item.strip()]
+    text = raw.strip()
+    if text.startswith("["):
+        return _parse_env_json_list(text, field_name=field_name)
+    return _split_env_list(text)
 
 
 def _load_dotenv_values(env_file: str | Path | None) -> dict[str, str]:
@@ -123,6 +171,9 @@ def _load_dotenv_values(env_file: str | Path | None) -> dict[str, str]:
     # Delegate to boti's validated loader (rejects NUL bytes, control
     # characters, and malformed variable names) instead of hand-parsing.
     return load_dotenv_values(path)
+
+
+_ELIDED_REPR_FIELDS = frozenset({"cluster_kwargs", "client_kwargs"})
 
 
 @dataclass(slots=True)
@@ -151,6 +202,19 @@ class DaskSessionSettings:
             from .clusters import normalise_cluster_kind
 
             self.cluster_kind = normalise_cluster_kind(self.cluster_kind)
+
+    def __repr__(self) -> str:
+        """Field values, except that ``cluster_kwargs`` and ``client_kwargs`` show
+        key names only: their values may hold credentials or security objects."""
+        parts: list[str] = []
+        for spec in fields(self):
+            value = getattr(self, spec.name)
+            if spec.name in _ELIDED_REPR_FIELDS:
+                rendered = "{" + ", ".join(f"{key!r}: ..." for key in sorted(value)) + "}"
+            else:
+                rendered = repr(value)
+            parts.append(f"{spec.name}={rendered}")
+        return f"{type(self).__name__}({', '.join(parts)})"
 
     @classmethod
     def from_env_prefix(

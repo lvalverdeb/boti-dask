@@ -89,6 +89,7 @@ class SessionRebindMixin:
     """Adds :meth:`rebind`, the optional :class:`Watchdog` and telemetry gauges to a session."""
 
     # Provided by DaskSession.
+    namespace: str
     client: Any | None
     logger: Any | None
     shared_key: str | None
@@ -183,9 +184,11 @@ class SessionRebindMixin:
         self.record_gauges()
         self._sync_uploads()
         if self.logger is not None:
+            # The namespace is the explicit key or a digest of the derived one,
+            # which embeds repr(client_kwargs); None for a managed session.
             self.logger.warning(
                 "Rebound Dask session key=%r to %s",
-                self._shared_session_key,
+                None if self._shared_session_key is None else self.namespace,
                 getattr(client, "dashboard_link", None) or type(client).__name__,
             )
         return client

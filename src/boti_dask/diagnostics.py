@@ -14,11 +14,16 @@ def _has_dask_graph(obj: Any) -> bool:
     return hasattr(obj, "__dask_graph__")
 
 
-def inspect_graph(obj: Any, *, logger: Any | None = None) -> dict[str, Any]:
-    """Return compact Dask graph metrics for diagnostics and dry-run usage."""
+def inspect_graph(obj: Any, *, logger: Any | None = None, level: str = "info") -> dict[str, Any]:
+    """Return compact Dask graph metrics for diagnostics and dry-run usage.
+
+    Materialises the full graph, so the cost grows with the task count. The
+    metrics line goes to *logger* at *level* (``"info"`` by default; the
+    ``safe_*`` wrappers pass ``"debug"``).
+    """
     if not _has_dask_graph(obj):
         metrics = {"type": type(obj).__name__, "is_dask": False}
-        _log(logger, "info", f"Dask graph inspection metrics={metrics}")
+        _log(logger, level, f"Dask graph inspection metrics={metrics}")
         return metrics
 
     graph = obj.__dask_graph__()
@@ -34,7 +39,7 @@ def inspect_graph(obj: Any, *, logger: Any | None = None) -> dict[str, Any]:
         "npartitions": getattr(obj, "npartitions", None),
         "graph_layers": graph_layers,
     }
-    _log(logger, "info", f"Dask graph inspection metrics={metrics}")
+    _log(logger, level, f"Dask graph inspection metrics={metrics}")
     return metrics
 
 
