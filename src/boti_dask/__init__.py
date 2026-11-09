@@ -16,6 +16,10 @@ _LAZY = {
     "describe_frame": ("boti_dask.diagnostics", "describe_frame"),
     "diagnostics_logger": ("boti_dask.diagnostics", "diagnostics_logger"),
     "inspect_graph": ("boti_dask.diagnostics", "inspect_graph"),
+    # Named cluster backends (kubernetes/slurm/coiled), each imported on first use.
+    "CLUSTER_KINDS": ("boti_dask.clusters", "CLUSTER_KINDS"),
+    "cluster_factory": ("boti_dask.clusters", "cluster_factory"),
+    "make_cluster": ("boti_dask.clusters", "make_cluster"),
     # Cluster-wide primitives with process-local fallbacks (Dask only if a client exists).
     "cluster_lock": ("boti_dask.primitives", "cluster_lock"),
     "cluster_queue": ("boti_dask.primitives", "cluster_queue"),

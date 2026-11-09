@@ -80,6 +80,15 @@ class DaskSessionSettings:
     min_workers: int = DEFAULT_MIN_WORKERS
     cluster_kwargs: dict[str, Any] = field(default_factory=dict)
     client_kwargs: dict[str, Any] = field(default_factory=dict)
+    # One of boti_dask.clusters.CLUSTER_KINDS; None keeps DaskSession's default
+    # (LocalCluster). Ignored when scheduler_address is set.
+    cluster_kind: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.cluster_kind is not None:
+            from .clusters import normalise_cluster_kind
+
+            self.cluster_kind = normalise_cluster_kind(self.cluster_kind)
 
     @classmethod
     def from_env_prefix(
@@ -100,6 +109,7 @@ class DaskSessionSettings:
         min_workers_raw = merged.get(f"{normalized_prefix}MIN_WORKERS")
         cluster_kwargs_raw = merged.get(f"{normalized_prefix}CLUSTER_KWARGS")
         client_kwargs_raw = merged.get(f"{normalized_prefix}CLIENT_KWARGS")
+        cluster_kind = merged.get(f"{normalized_prefix}CLUSTER_KIND")
 
         return cls(
             scheduler_address=scheduler_address or None,
@@ -122,6 +132,7 @@ class DaskSessionSettings:
             client_kwargs={}
             if client_kwargs_raw is None
             else _parse_env_json_mapping(client_kwargs_raw, field_name="client_kwargs"),
+            cluster_kind=cluster_kind or None,
         )
 
     def to_session_kwargs(self) -> dict[str, Any]:
@@ -141,4 +152,8 @@ class DaskSessionSettings:
             payload["scheduler_address"] = self.scheduler_address
         if self.shared_key:
             payload["shared_key"] = self.shared_key
+        if self.cluster_kind and not self.scheduler_address:
+            from .clusters import cluster_factory
+
+            payload["cluster_factory"] = cluster_factory(self.cluster_kind)
         return payload

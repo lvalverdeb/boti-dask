@@ -7,6 +7,9 @@ def test_boti_dask_exports_public_symbols():
     expected = {
         "DaskSession",
         "DaskSessionSettings",
+        "CLUSTER_KINDS",
+        "cluster_factory",
+        "make_cluster",
         "UniqueValuesExtractor",
         "apply_recommended_dask_config",
         "async_safe_compute",
