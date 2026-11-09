@@ -75,6 +75,24 @@ def test_lock_and_queue_are_shared_by_name_on_the_cluster():
         assert sorted(q.get(timeout=5) for _ in range(3)) == [0, 1, 2]
 
 
+def test_semaphore_limit_is_first_writer_wins_on_the_cluster(caplog):
+    pytest.importorskip("dask.distributed")
+    with dask_session(
+        cluster_kwargs={
+            "n_workers": 1,
+            "threads_per_worker": 1,
+            "processes": False,
+            "dashboard_address": ":0",
+        }
+    ) as client:
+        first = cluster_semaphore("test:limit", max_leases=4, client=client)
+        with caplog.at_level("WARNING", logger="boti_dask.primitives"):
+            second = cluster_semaphore("test:limit", max_leases=8, client=client)
+        assert first.max_leases == 4
+        assert second.max_leases == 4
+    assert any("first creator's limit wins" in r.getMessage() for r in caplog.records)
+
+
 def test_primitives_are_closed_with_their_client():
     closed: list[str] = []
 

@@ -10,7 +10,7 @@ under *Changed*.
 ## [1.1.0] - 2026-11-09
 
 ### Added
-- `cluster_semaphore`, `cluster_lock` and `cluster_queue`: coordination primitives shared by name across the cluster when a running client exists (passed in, or discovered inside a worker task) and across the process otherwise, so dependents such as boti-data's partition fetch gate write one code path and never import `distributed`. Primitives obtained through a client are closed with it.
+- `cluster_semaphore`, `cluster_lock` and `cluster_queue`: coordination primitives shared by name across the cluster when a running client exists (passed in, or discovered inside a worker task) and across the process otherwise, so dependents such as boti-data's partition fetch gate write one code path and never import `distributed`. Primitives obtained through a client are closed with it. A semaphore re-requested with a different limit keeps the first creator's limit and logs a warning.
 - `ConnectivityCheck` and `DaskSessionUnavailable`. `DaskSessionSettings` reads `{PREFIX}CONNECTIVITY_TIMEOUT` and `{PREFIX}MIN_WORKERS`.
 - A compatibility-matrix workflow that tests the floor, locked and latest versions of Dask and boti on every push, weekly, and on `repository_dispatch` type `upstream-release`.
 - This changelog.

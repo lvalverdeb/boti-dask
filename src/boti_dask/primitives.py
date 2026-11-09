@@ -14,7 +14,9 @@ and closed when that client is closed.
 
 from __future__ import annotations
 
+import logging
 import queue
+import re
 import threading
 from typing import Any
 
@@ -22,6 +24,10 @@ from ._internal import _is_running_client
 from .session_pool import pool
 
 _NAMESPACE = "boti-dask"
+_module_log = logging.getLogger(__name__)
+# distributed refuses to re-create a named semaphore with a different limit:
+# "Inconsistent max leases: 8, expected: 4". The first creator's limit wins.
+_INCONSISTENT_LEASES = re.compile(r"Inconsistent max leases: \d+, expected: (\d+)")
 
 _local_registry: dict[tuple[str, str], Any] = {}
 _local_registry_lock = threading.Lock()
@@ -72,7 +78,25 @@ def cluster_semaphore(name: str, max_leases: int = 1, *, client: Any | None = No
         return _local("semaphore", qualified, lambda: threading.BoundedSemaphore(max_leases))
     from distributed import Semaphore
 
-    primitive = Semaphore(max_leases=max_leases, name=qualified)
+    try:
+        primitive = Semaphore(max_leases=max_leases, name=qualified)
+        # Registration is otherwise deferred to the first acquire; do it now so a
+        # limit conflict surfaces here, where it can be resolved, not mid-task.
+        primitive.register()
+    except ValueError as exc:
+        match = _INCONSISTENT_LEASES.search(str(exc))
+        if match is None:
+            raise
+        existing = int(match.group(1))
+        _module_log.warning(
+            "cluster_semaphore(%r): limit %d requested but %d is already set on the "
+            "scheduler; the first creator's limit wins",
+            name,
+            max_leases,
+            existing,
+        )
+        primitive = Semaphore(max_leases=existing, name=qualified)
+        primitive.register()
     pool.track_primitive(live, primitive)
     return primitive
 
