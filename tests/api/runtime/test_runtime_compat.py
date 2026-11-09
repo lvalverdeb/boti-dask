@@ -52,12 +52,15 @@ def test_dask_session_connects_to_scheduler_address_and_logs():
     LocalCluster = distributed.LocalCluster
     logger = CaptureLogger()
 
-    with LocalCluster(
-        n_workers=1,
-        threads_per_worker=1,
-        processes=False,
-        dashboard_address=":0",
-    ) as cluster, Client(cluster):
+    with (
+        LocalCluster(
+            n_workers=1,
+            threads_per_worker=1,
+            processes=False,
+            dashboard_address=":0",
+        ) as cluster,
+        Client(cluster),
+    ):
         with dask_session(scheduler_address=cluster.scheduler_address, logger=logger) as client:
             summary = describe_client(client)
 
@@ -68,7 +71,14 @@ def test_dask_session_connects_to_scheduler_address_and_logs():
 def test_dask_session_can_create_managed_local_cluster():
     pytest.importorskip("dask.distributed")
 
-    with dask_session(cluster_kwargs={"n_workers": 1, "threads_per_worker": 1, "processes": False, "dashboard_address": ":0"}) as client:
+    with dask_session(
+        cluster_kwargs={
+            "n_workers": 1,
+            "threads_per_worker": 1,
+            "processes": False,
+            "dashboard_address": ":0",
+        }
+    ) as client:
         summary = describe_client(client)
 
     assert summary["workers"] == 1
@@ -103,7 +113,9 @@ def test_safe_compute_rejects_local_fallback_for_dask_dataframes():
 
 def test_safe_compute_dry_run_skips_execution_and_logs():
     logger = CaptureLogger()
-    delayed_value = dask.delayed(lambda: (_ for _ in ()).throw(AssertionError("should not execute")))()
+    delayed_value = dask.delayed(
+        lambda: (_ for _ in ()).throw(AssertionError("should not execute"))
+    )()
 
     result = safe_compute(delayed_value, logger=logger, dry_run=True)
 
@@ -136,7 +148,9 @@ def test_safe_head_returns_dataframe_preview_with_distributed_client():
     distributed = pytest.importorskip("dask.distributed")
     LocalCluster = distributed.LocalCluster
 
-    frame = dd.from_pandas(pd.DataFrame({"id": [1, 2, 3], "status": ["a", "b", "c"]}), npartitions=2)
+    frame = dd.from_pandas(
+        pd.DataFrame({"id": [1, 2, 3], "status": ["a", "b", "c"]}), npartitions=2
+    )
 
     with LocalCluster(
         n_workers=1,
@@ -196,7 +210,9 @@ def test_managed_session_warns_before_persisted_dataframe_becomes_invalid():
             persisted = safe_persist(frame, dask_client=client)
             safe_wait(persisted, dask_client=client, timeout=5)
 
-    assert "Closing managed Dask session with 1 live persisted collection" in str(recorded[0].message)
+    assert "Closing managed Dask session with 1 live persisted collection" in str(
+        recorded[0].message
+    )
     assert "head()/compute() calls may fail with Missing dependency" in str(recorded[0].message)
 
     with pytest.raises(ValueError, match="Missing dependency"):

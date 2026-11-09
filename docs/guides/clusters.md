@@ -23,6 +23,13 @@ configuration rather than in code.
 existing `{PREFIX}CLUSTER_KWARGS` JSON is passed to it. A `{PREFIX}SCHEDULER_ADDRESS` takes
 precedence, since connecting to a scheduler builds no cluster.
 
+Only sizing, placement and naming keys are accepted from the environment
+(`boti_dask.session_settings.ENV_CLUSTER_KWARGS`: `n_workers`, `threads_per_worker`,
+`memory_limit`, `cores`, `memory`, `queue`, `walltime`, `name`, `namespace`, `image` and
+the like). Keys that load code at start-up, such as `preload`, `worker_class`, `security`
+or a job-script prologue, are refused with an error: pass them as
+`DaskSession(cluster_kwargs=...)` in code, where they are reviewed with the rest of it.
+
 ```bash
 export ETL_DASK_CLUSTER_KIND=slurm
 export ETL_DASK_CLUSTER_KWARGS='{"queue": "batch", "cores": 8, "memory": "32GB"}'

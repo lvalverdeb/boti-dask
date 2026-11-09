@@ -35,4 +35,3 @@ async def test_unique_values_extractor_reads_unique_values():
 def test_diagnostics_logger_falls_back_to_stdlib_logger():
     logger = diagnostics_logger(None, name="boti_dask.tests")
     assert hasattr(logger, "info")
-

@@ -16,6 +16,11 @@ with dask_session(
 
 From the environment: `{PREFIX}UPLOAD` as a comma-separated list.
 
+A path entry must exist; a missing one is an error rather than a package name, so a
+mistyped path never becomes a pip install on every worker. Requirement entries must be
+plain PEP 508 strings (`rich>=13`, `pkg[extra]; python_version >= "3.11"`): option
+lines, `${VAR}` expansion and direct-URL requirements are refused.
+
 | Payload                                | How it ships                                                                                 |
 |----------------------------------------|----------------------------------------------------------------------------------------------|
 | `.py`, `.zip`, `.egg`, `.pyz` file     | `Client.upload_file`; workers import or add it to `sys.path`.                                |

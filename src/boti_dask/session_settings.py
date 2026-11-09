@@ -48,6 +48,53 @@ def _parse_env_number(raw: str, *, field_name: str, kind: type[int] | type[float
     return value
 
 
+# Cluster keyword arguments accepted from the environment. Dask cluster classes
+# also take keys that load code at start-up (``preload``, ``worker_class``,
+# ``security``, job-script prologues), and a dotenv file is not a place to
+# decide what runs. Anything else goes through ``DaskSession(cluster_kwargs=...)``
+# in code.
+ENV_CLUSTER_KWARGS: frozenset[str] = frozenset(
+    {
+        # sizing
+        "n_workers",
+        "threads_per_worker",
+        "processes",
+        "memory_limit",
+        "nanny",
+        "cores",
+        "memory",
+        "queue",
+        "walltime",
+        "account",
+        "project",
+        "resources",
+        # placement and naming
+        "name",
+        "namespace",
+        "image",
+        "interface",
+        "host",
+        "protocol",
+        "dashboard_address",
+        "scheduler_port",
+        "local_directory",
+        "log_directory",
+    }
+)
+
+
+def _parse_env_cluster_kwargs(raw: str, *, field_name: str) -> dict[str, Any]:
+    kwargs = _parse_env_json_mapping(raw, field_name=field_name)
+    refused = sorted(key for key in kwargs if key not in ENV_CLUSTER_KWARGS)
+    if refused:
+        raise ValueError(
+            f"{field_name!r} from the environment does not accept {refused!r}. Keys accepted "
+            f"from the environment: {sorted(ENV_CLUSTER_KWARGS)}. Pass other cluster arguments "
+            "as DaskSession(cluster_kwargs=...) in code."
+        )
+    return kwargs
+
+
 def _parse_env_json_mapping(raw: str, *, field_name: str) -> dict[str, Any]:
     try:
         parsed = json.loads(raw)
@@ -147,7 +194,7 @@ class DaskSessionSettings:
             else int(_parse_env_number(min_workers_raw, field_name="min_workers", kind=int)),
             cluster_kwargs={}
             if cluster_kwargs_raw is None
-            else _parse_env_json_mapping(cluster_kwargs_raw, field_name="cluster_kwargs"),
+            else _parse_env_cluster_kwargs(cluster_kwargs_raw, field_name="cluster_kwargs"),
             client_kwargs={}
             if client_kwargs_raw is None
             else _parse_env_json_mapping(client_kwargs_raw, field_name="client_kwargs"),

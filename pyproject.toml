@@ -23,6 +23,7 @@ classifiers = [
 dependencies = [
     "boti>=1.0.2,<2.0.0",
     "dask[dataframe,distributed]>=2026.3.0,<2027.0.0",
+    "packaging>=24.0",
     "pandas>=3.0.2,<4.0.0",
 ]
 

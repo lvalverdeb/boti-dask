@@ -138,3 +138,33 @@ def test_settings_read_upload_list(monkeypatch):
     assert settings.upload == ["./src/mypkg", "rich>=13"]
     assert settings.to_session_kwargs()["upload"] == ["./src/mypkg", "rich>=13"]
     assert "upload" not in DaskSessionSettings().to_session_kwargs()
+
+
+def test_a_missing_path_is_an_error_not_a_requirement(tmp_path):
+    """A mistyped path must never turn into a pip install on every worker."""
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        classify_payload(tmp_path / "etl_jobs")
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        classify_payload("./src/etl_jobs")
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        classify_payload("jobs.py")
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "-r requirements.txt",
+        "--index-url http://127.0.0.1/simple rich",
+        "rich @ git+https://example.invalid/rich.git",
+        "${PIP_EXTRA} rich",
+        "rich; evil",
+    ],
+)
+def test_requirement_strings_pip_would_read_as_options_or_urls_are_refused(entry):
+    with pytest.raises(ValueError, match="requirement"):
+        classify_payload(entry)
+
+
+def test_plain_requirements_still_classify():
+    for entry in ("rich", "rich>=13,<14", "rich[jupyter]>=13; python_version >= '3.10'"):
+        assert classify_payload(entry).kind is PayloadKind.REQUIREMENT

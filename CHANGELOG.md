@@ -7,6 +7,20 @@ under *Changed*.
 
 ## [Unreleased]
 
+### Security
+
+- **`{PREFIX}CLUSTER_KWARGS` accepts only sizing, placement and naming keys**
+  (`ENV_CLUSTER_KWARGS`). Dask cluster classes also take keys that load code
+  at start-up (`preload`, `worker_class`, `security`, job-script prologues),
+  and an environment file is not where that decision belongs. Other keys are
+  refused with an error naming the accepted set; pass them as
+  `DaskSession(cluster_kwargs=...)` in code.
+- **An upload entry that names a missing path is an error.** It was silently
+  reclassified as a pip requirement and installed on every worker, so a
+  mistyped path became a package install. Requirement strings must parse as
+  PEP 508 (`packaging.requirements.Requirement`); option lines, `${VAR}`
+  expansion and direct-URL requirements are refused.
+
 ## [1.2.0] - 2026-11-09
 
 ### Added

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import shutil
 import tempfile
 import zipfile
@@ -19,6 +20,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+
+from packaging.requirements import InvalidRequirement, Requirement
 
 from ._internal import _log
 
@@ -74,26 +77,69 @@ def _zip_directory(root: Path, target: Path) -> None:
             archive.writestr(info, path.read_bytes())
 
 
-def classify_payload(item: str | Path) -> Payload:
-    """Decide how *item* ships and compute its digest; the digest never touches the cluster."""
-    path = Path(item).expanduser()
+def _looks_like_path(text: str) -> bool:
+    if "://" in text or any(ch.isspace() for ch in text):
+        return False  # a URL or an option line: the requirement validator names the problem
+    return (
+        "/" in text
+        or os.sep in text
+        or text.startswith((".", "~"))
+        or Path(text).suffix in _LOADABLE_SUFFIXES | {".whl"}
+    )
+
+
+def _requirement_payload(text: str) -> Payload:
+    """A PEP 508 requirement, and nothing pip would read as an option or a URL.
+
+    PipInstall writes each entry as a line of a requirements file on every
+    worker, where option lines (``-r``, ``--index-url``), direct URLs and
+    ``${VAR}`` expansion are all honoured. Only a parseable name with
+    optional extras, version specifiers and markers is accepted.
+    """
+    try:
+        requirement = Requirement(text)
+    except InvalidRequirement as exc:
+        raise ValueError(
+            f"Upload entry {text!r} is neither an existing path nor a requirement "
+            f"such as 'package>=1.0' ({exc})."
+        ) from exc
+    if requirement.url is not None:
+        raise ValueError(
+            f"Upload entry {text!r} is a direct-URL requirement; ship the wheel file instead."
+        )
+    return Payload(PayloadKind.REQUIREMENT, text, hashlib.sha256(text.encode()).hexdigest())
+
+
+def _path_payload(path: Path) -> Payload:
     if path.is_dir():
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / f"{path.name}.zip"
             _zip_directory(path, target)
             return Payload(PayloadKind.DIRECTORY, str(path), _file_digest(target))
-    if path.is_file():
-        kind = PayloadKind.WHEEL if path.suffix == ".whl" else PayloadKind.FILE
-        if kind is PayloadKind.FILE and path.suffix not in _LOADABLE_SUFFIXES:
-            raise ValueError(
-                f"Cannot upload {path}: workers load .py, .zip, .egg, .pyz and pure-Python "
-                ".whl files; pass a requirement string for anything that needs pip."
-            )
-        return Payload(kind, str(path), _file_digest(path))
+    kind = PayloadKind.WHEEL if path.suffix == ".whl" else PayloadKind.FILE
+    if kind is PayloadKind.FILE and path.suffix not in _LOADABLE_SUFFIXES:
+        raise ValueError(
+            f"Cannot upload {path}: workers load .py, .zip, .egg, .pyz and pure-Python "
+            ".whl files; pass a requirement string for anything that needs pip."
+        )
+    return Payload(kind, str(path), _file_digest(path))
+
+
+def classify_payload(item: str | Path) -> Payload:
+    """Decide how *item* ships and compute its digest; the digest never touches the cluster.
+
+    A path must exist: a missing one is an error rather than a package name,
+    so a mistyped path never turns into a pip install on every worker.
+    """
+    path = Path(item).expanduser()
+    if path.exists():
+        return _path_payload(path)
     text = str(item).strip()
+    if isinstance(item, Path) or _looks_like_path(text):
+        raise FileNotFoundError(f"Upload path {item} does not exist.")
     if not text:
         raise ValueError("Upload payloads must be a path or a non-empty requirement string.")
-    return Payload(PayloadKind.REQUIREMENT, text, hashlib.sha256(text.encode()).hexdigest())
+    return _requirement_payload(text)
 
 
 def _send_file_payload(client: Any, payload: Payload) -> None:

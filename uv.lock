@@ -314,6 +314,7 @@ source = { editable = "." }
 dependencies = [
     { name = "boti" },
     { name = "dask", extra = ["dataframe", "distributed"] },
+    { name = "packaging" },
     { name = "pandas" },
 ]
 
@@ -366,6 +367,7 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'diagnostics'", specifier = ">=2.3.0,<3.0.0" },
     { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.30.0,<2.0.0" },
     { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.30.0,<2.0.0" },
+    { name = "packaging", specifier = ">=24.0" },
     { name = "pandas", specifier = ">=3.0.2,<4.0.0" },
     { name = "polars", marker = "extra == 'diagnostics'", specifier = ">=1.29.0,<2.0.0" },
     { name = "pyarrow", marker = "extra == 'diagnostics'", specifier = ">=23.0.1,<24.0.0" },

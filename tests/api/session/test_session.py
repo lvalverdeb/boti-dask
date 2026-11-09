@@ -46,13 +46,18 @@ def test_dask_session_connects_to_scheduler_address():
     Client = distributed.Client
     LocalCluster = distributed.LocalCluster
 
-    with LocalCluster(
-        n_workers=1,
-        threads_per_worker=1,
-        processes=False,
-        dashboard_address=":0",
-    ) as cluster, Client(cluster):
-        with dask_session(scheduler_address=cluster.scheduler_address, verify_connectivity=True) as client:
+    with (
+        LocalCluster(
+            n_workers=1,
+            threads_per_worker=1,
+            processes=False,
+            dashboard_address=":0",
+        ) as cluster,
+        Client(cluster),
+    ):
+        with dask_session(
+            scheduler_address=cluster.scheduler_address, verify_connectivity=True
+        ) as client:
             summary = describe_client(client)
 
     assert summary["workers"] == 1
@@ -138,10 +143,7 @@ def test_concurrent_shared_first_open_creates_single_cluster(monkeypatch):
         for _ in range(2)
     ]
     clients: list[object] = []
-    threads = [
-        threading.Thread(target=lambda s=s: clients.append(s.open()))
-        for s in sessions
-    ]
+    threads = [threading.Thread(target=lambda s=s: clients.append(s.open())) for s in sessions]
     try:
         for t in threads:
             t.start()
@@ -218,6 +220,18 @@ def test_dask_session_settings_from_env_prefix(tmp_path):
     assert settings.verify_connectivity is True
     assert settings.cluster_kwargs == {"n_workers": 2, "threads_per_worker": 1}
     assert settings.client_kwargs == {"set_as_default": False}
+
+
+@pytest.mark.parametrize("key", ["preload", "worker_class", "security", "job_script_prologue"])
+def test_dask_session_settings_refuse_code_loading_cluster_kwargs_from_env(tmp_path, key):
+    """A dotenv file sizes a cluster; it does not decide what code it runs at start-up."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f'DASK_SESSION_CLUSTER_KWARGS={{"n_workers": 1, "{key}": ["x"]}}\n', encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match=f"does not accept \\['{key}'\\]"):
+        DaskSessionSettings.from_env_prefix("DASK_SESSION_", env_file=env_file)
 
 
 def test_dask_session_settings_reject_invalid_json(tmp_path):

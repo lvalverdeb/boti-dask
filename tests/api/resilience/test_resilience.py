@@ -132,8 +132,7 @@ def test_to_int_safe_logs_debug_when_numpy_fast_path_fails_for_list(monkeypatch,
 
     assert result == 5
     assert any(
-        "numpy fast path failed for tuple/list value" in record.message
-        for record in caplog.records
+        "numpy fast path failed for tuple/list value" in record.message for record in caplog.records
     )
 
 
@@ -185,7 +184,5 @@ def test_dask_is_probably_empty_logs_debug_when_len_fails(caplog):
 
     assert result is False
     assert any(
-        "len() failed in dask_is_probably_empty" in record.message
-        for record in caplog.records
+        "len() failed in dask_is_probably_empty" in record.message for record in caplog.records
     )
-
