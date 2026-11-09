@@ -18,6 +18,9 @@ from boti.core.managed_resource import ManagedResource
 from boti.core.models import ResourceConfig
 
 from .session_helpers import (
+    ConnectivityCheck,
+    DaskSessionUnavailable,
+    _open_client,
     _prepare_cluster_kwargs,
     _stable_mapping_repr,
     _verify_client_connection,
@@ -76,6 +79,12 @@ class DaskSession(ManagedResource):
     Accepts an existing client, connects to a scheduler address, or creates a
     local cluster.  Supports shared (multi-holder) and managed (single-holder)
     session patterns.
+
+    ``verify_connectivity`` is on by default: before a client is handed out the
+    scheduler is pinged, at least one worker is awaited and a trivial task is
+    run, all within :class:`ConnectivityCheck.timeout` (10 s). Pass ``False`` to
+    skip, or a :class:`ConnectivityCheck` to change the deadline or worker count.
+    A failed check raises :class:`DaskSessionUnavailable` instead of hanging.
     """
 
     def __init__(
@@ -88,7 +97,7 @@ class DaskSession(ManagedResource):
         logger: Any | None = None,
         shared: bool = False,
         shared_key: str | None = None,
-        verify_connectivity: bool = False,
+        verify_connectivity: bool | ConnectivityCheck = True,
         config: ResourceConfig | None = None,
         verbose: bool = False,
         debug: bool = False,
@@ -113,7 +122,7 @@ class DaskSession(ManagedResource):
         self.client_kwargs = dict(client_kwargs or {})
         self.shared = shared
         self.shared_key = shared_key
-        self.verify_connectivity = verify_connectivity
+        self.connectivity: ConnectivityCheck | None = _resolve_connectivity(verify_connectivity)
 
         # Runtime state
         self._cluster: Any | None = None
@@ -152,9 +161,9 @@ class DaskSession(ManagedResource):
         )
 
     def _verify_client_if_requested(self, client: Any) -> None:
-        if not self.verify_connectivity:
+        if self.connectivity is None:
             return
-        _verify_client_connection(client)
+        _verify_client_connection(client, self.connectivity)
         if self.logger is not None:
             self.logger.info("Verified Dask client connectivity %s", describe_client(client))
 
@@ -218,7 +227,7 @@ class DaskSession(ManagedResource):
 
     def _connect_to_scheduler(self) -> Any:
         """Connect directly to an existing scheduler address."""
-        client = Client(self.scheduler_address, **dict(self.client_kwargs))
+        client = _open_client(Client, self.scheduler_address, self.client_kwargs, self.connectivity)
         if self.shared:
             pool.register_shared_session(self._shared_key(), client=client, cluster=None)
             self.client = client
@@ -334,6 +343,12 @@ class DaskSession(ManagedResource):
         return cls(**payload)
 
 
+def _resolve_connectivity(value: bool | ConnectivityCheck) -> ConnectivityCheck | None:
+    if isinstance(value, ConnectivityCheck):
+        return value
+    return ConnectivityCheck() if value else None
+
+
 # Functional-style factory aliases for DaskSession/DaskSession.from_env_prefix
 # — the "underlying object" the rule suggests exposing is DaskSession itself,
 # already public and re-exported in __all__ right alongside these.
@@ -353,8 +368,10 @@ def dask_session(**kwargs: Any) -> DaskSession:
 
 
 __all__ = [
+    "ConnectivityCheck",
     "DaskSession",
     "DaskSessionSettings",
+    "DaskSessionUnavailable",
     "SessionPool",
     "apply_recommended_dask_config",
     "current_client_summary",

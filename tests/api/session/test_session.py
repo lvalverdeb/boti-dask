@@ -132,7 +132,9 @@ def test_concurrent_shared_first_open_creates_single_cluster(monkeypatch):
 
     key = "concurrent-first-open"
     sessions = [
-        DaskSession(shared=True, shared_key=key, cluster_factory=StubCluster)
+        DaskSession(
+            shared=True, shared_key=key, cluster_factory=StubCluster, verify_connectivity=False
+        )
         for _ in range(2)
     ]
     clients: list[object] = []

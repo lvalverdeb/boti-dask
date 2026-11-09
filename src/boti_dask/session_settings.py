@@ -11,6 +11,11 @@ from boti.core.settings import load_dotenv_values
 
 _ENV_PREFIX_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*_?$")
 
+# Connectivity-check defaults live here, the Dask-free module, so both the
+# settings and ConnectivityCheck (in session_helpers) read the same numbers.
+DEFAULT_CONNECTIVITY_TIMEOUT = 10.0
+DEFAULT_MIN_WORKERS = 1
+
 
 def _validate_env_prefix(prefix: str) -> str:
     normalized = prefix.strip()
@@ -30,6 +35,16 @@ def _parse_env_bool(raw: str, *, field_name: str) -> bool:
     raise ValueError(
         f"Invalid boolean value for {field_name!r}: {raw!r}. Use one of true/false, yes/no, 1/0."
     )
+
+
+def _parse_env_number(raw: str, *, field_name: str, kind: type[int] | type[float]) -> int | float:
+    try:
+        value = kind(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"Invalid {kind.__name__} value for {field_name!r}: {raw!r}.") from exc
+    if value <= 0:
+        raise ValueError(f"{field_name!r} must be positive, got {raw!r}.")
+    return value
 
 
 def _parse_env_json_mapping(raw: str, *, field_name: str) -> dict[str, Any]:
@@ -60,7 +75,9 @@ class DaskSessionSettings:
     scheduler_address: str | None = None
     shared: bool = False
     shared_key: str | None = None
-    verify_connectivity: bool = False
+    verify_connectivity: bool = True
+    connectivity_timeout: float = DEFAULT_CONNECTIVITY_TIMEOUT
+    min_workers: int = DEFAULT_MIN_WORKERS
     cluster_kwargs: dict[str, Any] = field(default_factory=dict)
     client_kwargs: dict[str, Any] = field(default_factory=dict)
 
@@ -79,6 +96,8 @@ class DaskSessionSettings:
         shared_raw = merged.get(f"{normalized_prefix}SHARED")
         shared_key = merged.get(f"{normalized_prefix}SHARED_KEY")
         verify_raw = merged.get(f"{normalized_prefix}VERIFY_CONNECTIVITY")
+        timeout_raw = merged.get(f"{normalized_prefix}CONNECTIVITY_TIMEOUT")
+        min_workers_raw = merged.get(f"{normalized_prefix}MIN_WORKERS")
         cluster_kwargs_raw = merged.get(f"{normalized_prefix}CLUSTER_KWARGS")
         client_kwargs_raw = merged.get(f"{normalized_prefix}CLIENT_KWARGS")
 
@@ -88,9 +107,15 @@ class DaskSessionSettings:
             if shared_raw is None
             else _parse_env_bool(shared_raw, field_name="shared"),
             shared_key=shared_key or None,
-            verify_connectivity=False
+            verify_connectivity=True
             if verify_raw is None
             else _parse_env_bool(verify_raw, field_name="verify_connectivity"),
+            connectivity_timeout=DEFAULT_CONNECTIVITY_TIMEOUT
+            if timeout_raw is None
+            else _parse_env_number(timeout_raw, field_name="connectivity_timeout", kind=float),
+            min_workers=DEFAULT_MIN_WORKERS
+            if min_workers_raw is None
+            else int(_parse_env_number(min_workers_raw, field_name="min_workers", kind=int)),
             cluster_kwargs={}
             if cluster_kwargs_raw is None
             else _parse_env_json_mapping(cluster_kwargs_raw, field_name="cluster_kwargs"),
@@ -100,9 +125,15 @@ class DaskSessionSettings:
         )
 
     def to_session_kwargs(self) -> dict[str, Any]:
+        from .session_helpers import ConnectivityCheck
+
         payload: dict[str, Any] = {
             "shared": self.shared,
-            "verify_connectivity": self.verify_connectivity,
+            "verify_connectivity": ConnectivityCheck(
+                timeout=self.connectivity_timeout, min_workers=self.min_workers
+            )
+            if self.verify_connectivity
+            else False,
             "cluster_kwargs": dict(self.cluster_kwargs),
             "client_kwargs": dict(self.client_kwargs),
         }

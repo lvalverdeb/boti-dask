@@ -38,6 +38,11 @@ with dask_session(cluster_kwargs={"n_workers": 1, "threads_per_worker": 1, "proc
 
 If `dashboard_address` is omitted for local managed sessions, `boti-dask` defaults it to `":0"`.
 
+Every session verifies the cluster before handing out the client: a scheduler ping, at least one
+worker and a round-trip task, within 10 seconds by default. A dead or empty cluster raises
+`DaskSessionUnavailable` instead of hanging; tune it with `verify_connectivity=ConnectivityCheck(timeout=..., min_workers=...)`
+or skip it with `verify_connectivity=False`. See `docs/api/session.md`.
+
 Load session defaults from prefixed environment variables:
 
 ```python
