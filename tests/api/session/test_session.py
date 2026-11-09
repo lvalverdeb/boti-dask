@@ -310,7 +310,7 @@ def test_prepare_cluster_kwargs_preserves_explicit_dashboard_address():
     assert explicit_none["dashboard_address"] is None
 
 
-def test_derived_shared_key_is_logged_as_a_digest_not_as_kwargs(monkeypatch, caplog):
+def test_derived_shared_key_is_logged_as_a_digest_not_as_kwargs(monkeypatch):
     """A derived pool key embeds repr(client_kwargs); log lines carry only its digest."""
 
     class StubCluster:
@@ -327,6 +327,17 @@ def test_derived_shared_key_is_logged_as_a_digest_not_as_kwargs(monkeypatch, cap
 
     monkeypatch.setattr(session_module, "Client", StubClient)
     logger = logging.getLogger("boti_dask.tests.shared_key")
+    logger.setLevel(logging.INFO)
+    captured: list[logging.LogRecord] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured.append(record)
+
+    # Attached to the logger itself: an earlier test may leave the boti_dask
+    # hierarchy not propagating to the root, which is where caplog listens.
+    handler = _Collect()
+    logger.addHandler(handler)
     secret = "hunter2-token"
     kwargs = dict(
         shared=True,
@@ -337,20 +348,22 @@ def test_derived_shared_key_is_logged_as_a_digest_not_as_kwargs(monkeypatch, cap
     )
     first = DaskSession(**kwargs)
     second = DaskSession(**kwargs)
-    with caplog.at_level(logging.INFO, logger=logger.name):
+    try:
         first.open()
         try:
             second.open()
         finally:
             second.close()
             first.close()
+    finally:
+        logger.removeHandler(handler)
 
-    reuse = [r for r in caplog.records if "Reusing shared Dask session" in r.getMessage()]
+    reuse = [r for r in captured if "Reusing shared Dask session" in r.getMessage()]
     assert len(reuse) == 1
     message = reuse[0].getMessage()
     assert f"key={second.namespace!r}" in message and len(second.namespace) == 16
     assert secret not in message and "client_kwargs" not in message
-    assert all(secret not in r.getMessage() for r in caplog.records)
+    assert all(secret not in r.getMessage() for r in captured)
 
 
 def test_dask_session_settings_repr_elides_kwargs_values():
