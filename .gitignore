@@ -17,4 +17,5 @@ dist/
 build/
 *.egg/
 *.egg-info
-.env
+.env.benchmarks/
+benchmark-results.json

@@ -4,7 +4,7 @@
 # from the Makefile's own location instead (always one level up).
 REPO_ROOT := $(shell realpath $(dir $(realpath $(lastword $(MAKEFILE_LIST))))..)
 
-.PHONY: help clean build verify check publish publish-test upload upload-test install-dev test lint
+.PHONY: help clean build verify check publish publish-test upload upload-test install-dev test lint bench bench-baseline
 
 LOAD_ENV = if [ -f .env ]; then set -a; . ./.env; set +a; fi
 REQUIRE_PUBLISH_TOKEN = test -n "$$UV_PUBLISH_TOKEN" || { echo "UV_PUBLISH_TOKEN is required (set it in .env or the environment)."; exit 1; }
@@ -21,7 +21,9 @@ help:
 	@echo "  upload-test    - Alias for publish-test (kept for backward compatibility)"
 	@echo "  install-dev    - Install package with dev dependencies"
 	@echo "  test           - Run test suite"
-	@echo "  lint           - Run ruff linter on src/ and tests/"
+	@echo "  lint           - Run ruff linter on src/, tests/ and benchmarks/"
+	@echo "  bench          - Run the pytest-benchmark suite against benchmarks/baseline/local"
+	@echo "  bench-baseline - Re-record benchmarks/baseline/local on this machine"
 
 clean:
 	rm -rf $(REPO_ROOT)/dist/ $(REPO_ROOT)/build/ *.egg-info src/*.egg-info
@@ -55,4 +57,15 @@ test:
 	uv run pytest tests/ --tb=short -q
 
 lint:
-	uv run ruff check src/ tests/
+	uv run ruff check src/ tests/ benchmarks/
+
+BENCH = uv run pytest benchmarks --benchmark-only --benchmark-storage=benchmarks/baseline
+
+bench:
+	$(BENCH) --benchmark-compare=local/0001_baseline --benchmark-compare-fail=min:20%
+
+bench-baseline:
+	rm -rf benchmarks/baseline/local
+	$(BENCH) --benchmark-save=baseline
+	mv benchmarks/baseline/*-CPython-* benchmarks/baseline/local
+	uv run python -c "import json,pathlib; p=pathlib.Path('benchmarks/baseline/local/0001_baseline.json'); d=json.loads(p.read_text()); d['machine_info']['node']='local'; p.write_text(json.dumps(d, indent=2)+'\n')"

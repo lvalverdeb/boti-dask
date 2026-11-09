@@ -23,7 +23,7 @@ jobs:
         run: uv sync --locked --group dev
 
       - name: Lint
-        run: uv run ruff check src/ tests/
+        run: uv run ruff check src/ tests/ benchmarks/
 
       - name: Test
         run: uv run pytest --tb=short -q

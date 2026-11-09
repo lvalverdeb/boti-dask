@@ -1,0 +1,42 @@
+name: Benchmarks
+
+# Runs the pytest-benchmark suite on every push to main. When
+# benchmarks/baseline/ci holds a baseline recorded on these runners, a
+# minimum-time regression over 20 % fails the job; until then the run only
+# publishes its results, which is how that baseline gets seeded.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+
+      - name: Benchmark
+        run: |
+          args="--benchmark-only --benchmark-storage=benchmarks/baseline --benchmark-json=benchmark-results.json"
+          if ls benchmarks/baseline/ci/*.json >/dev/null 2>&1; then
+            args="$args --benchmark-compare=ci/0001_baseline --benchmark-compare-fail=min:20%"
+          else
+            echo "::notice::No CI baseline in benchmarks/baseline/ci; results published without comparison."
+          fi
+          uv run pytest benchmarks $args
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results.json
