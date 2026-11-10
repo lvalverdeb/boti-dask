@@ -7,6 +7,8 @@ under *Changed*.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-09
+
 ### Security
 
 - **`{PREFIX}UPLOAD` keeps extras and version ranges in one entry.** The value
@@ -112,7 +114,8 @@ under *Changed*.
 
 Last release before this changelog; see the git history.
 
-[Unreleased]: https://github.com/lvalverdeb/boti-dask/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/lvalverdeb/boti-dask/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/lvalverdeb/boti-dask/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/lvalverdeb/boti-dask/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/lvalverdeb/boti-dask/compare/v1.0.7...v1.1.0
 [1.0.7]: https://github.com/lvalverdeb/boti-dask/releases/tag/v1.0.7
